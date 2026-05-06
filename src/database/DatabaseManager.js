@@ -1,50 +1,84 @@
 const mysql = require('mysql2/promise');
+const { Client: PgClient } = require('pg');
 const archiver = require('archiver');
 const { PassThrough } = require('stream');
 
 class DatabaseManager {
     constructor(credentials) {
+        this.engine = credentials.engine || 'mysql';
+
+        const sslConfig = credentials.ssl ? {
+            rejectUnauthorized: credentials.ssl.rejectUnauthorized !== false,
+            ...(credentials.ssl.ca && { ca: credentials.ssl.ca }),
+            ...(credentials.ssl.cert && { cert: credentials.ssl.cert }),
+            ...(credentials.ssl.key && { key: credentials.ssl.key })
+        } : undefined;
+
+        if (this.engine === 'postgresql') {
+            this.pgBaseConfig = {
+                host: credentials.host || 'localhost',
+                port: credentials.port || 5432,
+                user: credentials.user,
+                password: credentials.password,
+                ...(sslConfig && { ssl: sslConfig })
+            };
+        }
+
         this.credentials = {
             host: credentials.host || 'localhost',
-            port: credentials.port || 3306,
+            port: credentials.port || (this.engine === 'postgresql' ? 5432 : 3306),
             user: credentials.user,
             password: credentials.password,
-            connectTimeout: 60000
+            connectTimeout: 60000,
+            ...(sslConfig && { ssl: sslConfig })
         };
-
-        if (credentials.ssl) {
-            this.credentials.ssl = {
-                rejectUnauthorized: credentials.ssl.rejectUnauthorized !== false
-            };
-
-            if (credentials.ssl.ca) this.credentials.ssl.ca = credentials.ssl.ca;
-            if (credentials.ssl.cert) this.credentials.ssl.cert = credentials.ssl.cert;
-            if (credentials.ssl.key) this.credentials.ssl.key = credentials.ssl.key;
-        }
 
         this.connection = null;
     }
 
+    // ─── PostgreSQL helpers ───────────────────────────────────────────────────
+
+    /** Create a pg.Client connected to the given database (default: postgres) */
+    async _pgGetClient(database = 'postgres') {
+        const client = new PgClient({ ...this.pgBaseConfig, database });
+        await client.connect();
+        return client;
+    }
+
+    /** Double-quote a PostgreSQL identifier safely */
+    _pgEscapeId(name) {
+        return '"' + String(name).replace(/"/g, '""') + '"';
+    }
+
+    /** Escape a literal value for use in exported SQL (not for parameterised queries) */
+    _pgEscapeLiteral(value) {
+        if (value === null || value === undefined) return 'NULL';
+        if (typeof value === 'number') return value.toString();
+        if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+        if (typeof value === 'object') return "'" + JSON.stringify(value).replace(/'/g, "''") + "'";
+        return "'" + String(value).replace(/'/g, "''") + "'";
+    }
+
+    // ─── Connection ───────────────────────────────────────────────────────────
+
     async connect() {
         try {
-            if (this.credentials.ssl) {
-                console.log('Attempting secure SSL connection to database...');
+            if (this.engine === 'postgresql') {
+                console.log('Attempting PostgreSQL connection...');
+                // Connect to the default 'postgres' database to list all databases
+                this.connection = await this._pgGetClient('postgres');
+                console.log('PostgreSQL connected successfully');
             } else {
-                console.log('Attempting standard connection to database...');
+                if (this.credentials.ssl) {
+                    console.log('Attempting secure SSL connection to database...');
+                } else {
+                    console.log('Attempting standard connection to database...');
+                }
+                this.connection = await mysql.createConnection(this.credentials);
+                console.log(`Database connected successfully (${this.credentials.ssl ? 'SSL' : 'Non-SSL'})`);
             }
-
-            this.connection = await mysql.createConnection(this.credentials);
-            console.log(`Database connected successfully (${this.credentials.ssl ? 'SSL' : 'Non-SSL'})`);
         } catch (error) {
             console.error('Database connection failed:', error.message);
-            if (this.credentials.ssl) {
-                console.error('SSL Connection Details:', {
-                    ca_provided: !!this.credentials.ssl.ca,
-                    cert_provided: !!this.credentials.ssl.cert,
-                    key_provided: !!this.credentials.ssl.key,
-                    rejectUnauthorized: this.credentials.ssl.rejectUnauthorized
-                });
-            }
             throw error;
         }
     }
@@ -58,342 +92,383 @@ class DatabaseManager {
     }
 
     async getDatabases() {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         try {
-            const [rows] = await this.connection.execute('SHOW DATABASES');
-            return rows.map(row => row.Database);
+            if (this.engine === 'postgresql') {
+                const result = await this.connection.query(
+                    "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname"
+                );
+                return result.rows.map(r => r.datname);
+            } else {
+                const [rows] = await this.connection.execute('SHOW DATABASES');
+                return rows.map(row => row.Database);
+            }
         } catch (error) {
             throw new Error(`Failed to get databases: ${error.message}`);
         }
     }
 
     async getTables(databaseName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const [rows] = await this.connection.query(`SHOW TABLES FROM ${escapedDatabase}`);
-            const tableKey = `Tables_in_${databaseName}`;
-            return rows.map(row => row[tableKey]);
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const result = await client.query(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
+                    );
+                    return result.rows.map(r => r.tablename);
+                } finally {
+                    await client.end();
+                }
+            } else {
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const [rows] = await this.connection.query(`SHOW TABLES FROM ${escapedDatabase}`);
+                const tableKey = `Tables_in_${databaseName}`;
+                return rows.map(row => row[tableKey]);
+            }
         } catch (error) {
             throw new Error(`Failed to get tables: ${error.message}`);
         }
     }
 
     async getTableStructure(databaseName, tableName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const escapedTable = this.connection.escapeId(tableName);
-            const [rows] = await this.connection.query(`DESCRIBE ${escapedDatabase}.${escapedTable}`);
-            return rows;
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const result = await client.query(
+                        `SELECT
+                            c.column_name AS "Field",
+                            c.data_type AS "Type",
+                            c.is_nullable AS "Null",
+                            c.column_default AS "Default",
+                            CASE WHEN pk.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS "Key",
+                            '' AS "Extra"
+                         FROM information_schema.columns c
+                         LEFT JOIN (
+                             SELECT ku.column_name
+                             FROM information_schema.table_constraints tc
+                             JOIN information_schema.key_column_usage ku
+                                 ON tc.constraint_name = ku.constraint_name
+                                 AND tc.table_schema = ku.table_schema
+                                 AND tc.table_name = ku.table_name
+                             WHERE tc.constraint_type = 'PRIMARY KEY'
+                               AND tc.table_schema = 'public'
+                               AND tc.table_name = $1
+                         ) pk ON c.column_name = pk.column_name
+                         WHERE c.table_schema = 'public' AND c.table_name = $1
+                         ORDER BY c.ordinal_position`,
+                        [tableName]
+                    );
+                    return result.rows;
+                } finally {
+                    await client.end();
+                }
+            } else {
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const escapedTable = this.connection.escapeId(tableName);
+                const [rows] = await this.connection.query(`DESCRIBE ${escapedDatabase}.${escapedTable}`);
+                return rows;
+            }
         } catch (error) {
             throw new Error(`Failed to get table structure: ${error.message}`);
         }
     }
 
     async getTableData(databaseName, tableName, limit = 100, offset = 0, sortColumn = null, sortDirection = 'ASC', searchFilters = null, searchLogic = 'AND') {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         try {
-            // Escape database and table names to prevent SQL injection
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const escapedTable = this.connection.escapeId(tableName);
-            const fullTableName = `${escapedDatabase}.${escapedTable}`;
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const tableRef = `${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    const paramValues = [];
+                    let paramIndex = 1;
 
-            // Build WHERE clause for multi-column search
-            let whereClause = '';
-            if (searchFilters && Array.isArray(searchFilters) && searchFilters.length > 0) {
-                const validFilters = searchFilters.filter(f => f.column && f.value);
-                if (validFilters.length > 0) {
-                    const logic = searchLogic === 'OR' ? 'OR' : 'AND';
-                    const conditions = validFilters.map(f => {
-                        const escapedCol = this.connection.escapeId(f.column);
-                        const escapedVal = this.connection.escape(`%${f.value}%`);
-                        const operator = f.operator === 'NOT LIKE' ? 'NOT LIKE' : 'LIKE';
-                        return `${escapedCol} ${operator} ${escapedVal}`;
-                    });
-                    whereClause = ` WHERE ${conditions.join(` ${logic} `)}`;
+                    // Build WHERE clause
+                    let whereClause = '';
+                    if (searchFilters && Array.isArray(searchFilters) && searchFilters.length > 0) {
+                        const validFilters = searchFilters.filter(f => f.column && f.value);
+                        if (validFilters.length > 0) {
+                            const logic = searchLogic === 'OR' ? 'OR' : 'AND';
+                            const conditions = validFilters.map(f => {
+                                const col = this._pgEscapeId(f.column);
+                                const operator = f.operator === 'NOT LIKE' ? 'NOT ILIKE' : 'ILIKE';
+                                paramValues.push(`%${f.value}%`);
+                                return `${col}::text ${operator} $${paramIndex++}`;
+                            });
+                            whereClause = ` WHERE ${conditions.join(` ${logic} `)}`;
+                        }
+                    }
+
+                    // Build ORDER BY
+                    let orderClause = '';
+                    if (sortColumn) {
+                        const direction = sortDirection.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+                        orderClause = ` ORDER BY ${this._pgEscapeId(sortColumn)} ${direction}`;
+                    }
+
+                    // Count
+                    const countResult = await client.query(
+                        `SELECT COUNT(*) AS total FROM ${tableRef}${whereClause}`,
+                        paramValues
+                    );
+                    const total = parseInt(countResult.rows[0].total, 10);
+
+                    // Data
+                    const dataResult = await client.query(
+                        `SELECT * FROM ${tableRef}${whereClause}${orderClause} LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`,
+                        paramValues
+                    );
+
+                    return { data: dataResult.rows, total, limit, offset, sortColumn, sortDirection, searchFilters, searchLogic };
+                } finally {
+                    await client.end();
                 }
+            } else {
+                // ── MySQL path (original code) ─────────────────────────────────
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const escapedTable = this.connection.escapeId(tableName);
+                const fullTableName = `${escapedDatabase}.${escapedTable}`;
+
+                let whereClause = '';
+                if (searchFilters && Array.isArray(searchFilters) && searchFilters.length > 0) {
+                    const validFilters = searchFilters.filter(f => f.column && f.value);
+                    if (validFilters.length > 0) {
+                        const logic = searchLogic === 'OR' ? 'OR' : 'AND';
+                        const conditions = validFilters.map(f => {
+                            const escapedCol = this.connection.escapeId(f.column);
+                            const escapedVal = this.connection.escape(`%${f.value}%`);
+                            const operator = f.operator === 'NOT LIKE' ? 'NOT LIKE' : 'LIKE';
+                            return `${escapedCol} ${operator} ${escapedVal}`;
+                        });
+                        whereClause = ` WHERE ${conditions.join(` ${logic} `)}`;
+                    }
+                }
+
+                let orderClause = '';
+                if (sortColumn) {
+                    const escapedSortColumn = this.connection.escapeId(sortColumn);
+                    const direction = sortDirection.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+                    orderClause = ` ORDER BY ${escapedSortColumn} ${direction}`;
+                }
+
+                const countQuery = `SELECT COUNT(*) as total FROM ${fullTableName}${whereClause}`;
+                const [countResult] = await this.connection.query(countQuery);
+                const total = countResult[0].total;
+
+                const dataQuery = `SELECT * FROM ${fullTableName}${whereClause}${orderClause} LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
+                const [rows] = await this.connection.query(dataQuery);
+
+                return { data: rows, total, limit, offset, sortColumn, sortDirection, searchFilters, searchLogic };
             }
-
-            // Build ORDER BY clause for sorting
-            let orderClause = '';
-            if (sortColumn) {
-                const escapedSortColumn = this.connection.escapeId(sortColumn);
-                const direction = sortDirection.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-                orderClause = ` ORDER BY ${escapedSortColumn} ${direction}`;
-            }
-
-            // Get total count (with search filter if applied)
-            const countQuery = `SELECT COUNT(*) as total FROM ${fullTableName}${whereClause}`;
-            const [countResult] = await this.connection.query(countQuery);
-            const total = countResult[0].total;
-
-            // Get data with pagination, sorting, and search
-            const dataQuery = `SELECT * FROM ${fullTableName}${whereClause}${orderClause} LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
-            const [rows] = await this.connection.query(dataQuery);
-
-            return {
-                data: rows,
-                total: total,
-                limit: limit,
-                offset: offset,
-                sortColumn: sortColumn,
-                sortDirection: sortDirection,
-                searchFilters: searchFilters,
-                searchLogic: searchLogic
-            };
         } catch (error) {
             throw new Error(`Failed to get table data: ${error.message}`);
         }
     }
 
     async executeQuery(databaseName, query) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         try {
-            let finalQuery = query.trim();
+            if (this.engine === 'postgresql') {
+                const client = databaseName ? await this._pgGetClient(databaseName) : this.connection;
+                const ownClient = databaseName && client !== this.connection;
+                try {
+                    const statements = query.trim().split(/;(?=(?:[^']*'[^']*')*[^']*$)/)
+                        .map(s => s.trim()).filter(s => s.length > 0);
 
-            // Handle special cases for queries that need database context
+                    if (statements.length > 1) {
+                        const results = [];
+                        let totalAffected = 0;
+                        for (const stmt of statements) {
+                            const res = await client.query(stmt);
+                            const upper = stmt.trim().toUpperCase();
+                            if (upper.startsWith('SELECT') || upper.startsWith('WITH') || upper.startsWith('EXPLAIN')) {
+                                results.push({ statement: stmt, data: res.rows, rowCount: res.rowCount });
+                            } else {
+                                totalAffected += res.rowCount || 0;
+                            }
+                        }
+                        if (results.length > 0) {
+                            return { type: 'SELECT', data: results, rowCount: results.reduce((t, r) => t + r.rowCount, 0), multipleStatements: true };
+                        }
+                        return { type: 'MODIFY', affectedRows: totalAffected, insertId: null, message: `${statements.length} statements executed successfully` };
+                    }
+
+                    const res = await client.query(query.trim());
+                    const upper = query.trim().toUpperCase();
+                    if (upper.startsWith('SELECT') || upper.startsWith('WITH') || upper.startsWith('EXPLAIN') || upper.startsWith('SHOW')) {
+                        return { type: 'SELECT', data: res.rows, rowCount: res.rowCount };
+                    }
+                    return { type: 'MODIFY', affectedRows: res.rowCount || 0, insertId: null, message: 'Query executed successfully' };
+                } finally {
+                    if (ownClient) await client.end();
+                }
+            }
+
+            // ── MySQL path ──────────────────────────────────────────────────────
+            let finalQuery = query.trim();
             const upperQuery = query.toUpperCase().trim();
 
             if (upperQuery.startsWith('USE ')) {
-                // Handle USE statements by extracting the database name
                 const dbMatch = query.match(/USE\s+`?(\w+)`?/i);
                 if (dbMatch) {
-                    // For USE statements, we'll create a new connection with the database specified
                     try {
-                        const testConnection = await mysql.createConnection({
-                            ...this.credentials,
-                            database: dbMatch[1]
-                        });
+                        const testConnection = await mysql.createConnection({ ...this.credentials, database: dbMatch[1] });
                         await testConnection.end();
-                        return {
-                            type: 'MODIFY',
-                            affectedRows: 0,
-                            insertId: null,
-                            message: `Database changed to '${dbMatch[1]}'`
-                        };
+                        return { type: 'MODIFY', affectedRows: 0, insertId: null, message: `Database changed to '${dbMatch[1]}'` };
                     } catch (error) {
                         throw new Error(`Cannot use database '${dbMatch[1]}': ${error.message}`);
                     }
                 }
             }
 
-            // Check if query contains multiple statements (separated by semicolons)
             const statements = finalQuery.split(';').map(stmt => stmt.trim()).filter(stmt => stmt.length > 0);
 
             if (statements.length > 1) {
-                // Handle multiple statements
                 let totalAffectedRows = 0;
                 let results = [];
                 let lastInsertId = null;
 
-                // Create database-specific connection if needed
                 const execConnection = databaseName ?
-                    await mysql.createConnection({
-                        ...this.credentials,
-                        database: databaseName,
-                        multipleStatements: true
-                    }) : this.connection;
+                    await mysql.createConnection({ ...this.credentials, database: databaseName, multipleStatements: true }) :
+                    this.connection;
 
                 try {
                     for (const statement of statements) {
                         const [result] = await execConnection.query(statement);
-
                         if (statement.trim().toUpperCase().startsWith('SELECT') ||
                             statement.trim().toUpperCase().startsWith('SHOW') ||
                             statement.trim().toUpperCase().startsWith('DESCRIBE') ||
                             statement.trim().toUpperCase().startsWith('EXPLAIN')) {
-                            results.push({
-                                statement: statement,
-                                data: result,
-                                rowCount: result.length
-                            });
+                            results.push({ statement, data: result, rowCount: result.length });
                         } else {
                             totalAffectedRows += result.affectedRows || 0;
-                            if (result.insertId) {
-                                lastInsertId = result.insertId;
-                            }
+                            if (result.insertId) lastInsertId = result.insertId;
                         }
                     }
-
                     if (results.length > 0) {
-                        return {
-                            type: 'SELECT',
-                            data: results,
-                            rowCount: results.reduce((total, r) => total + r.rowCount, 0),
-                            multipleStatements: true
-                        };
-                    } else {
-                        return {
-                            type: 'MODIFY',
-                            affectedRows: totalAffectedRows,
-                            insertId: lastInsertId,
-                            message: `${statements.length} statements executed successfully`
-                        };
+                        return { type: 'SELECT', data: results, rowCount: results.reduce((total, r) => total + r.rowCount, 0), multipleStatements: true };
                     }
+                    return { type: 'MODIFY', affectedRows: totalAffectedRows, insertId: lastInsertId, message: `${statements.length} statements executed successfully` };
                 } finally {
-                    if (execConnection !== this.connection) {
-                        await execConnection.end();
-                    }
+                    if (execConnection !== this.connection) await execConnection.end();
                 }
             }
 
-            // Single statement execution
             if (databaseName) {
                 if (upperQuery.startsWith('SHOW TABLES')) {
                     const escapedDatabase = this.connection.escapeId(databaseName);
                     finalQuery = `SHOW TABLES FROM ${escapedDatabase}`;
                 } else {
-                    // For other queries, we need to execute them with database context
-                    // Create a temporary connection with the database specified
-                    const dbConnection = await mysql.createConnection({
-                        ...this.credentials,
-                        database: databaseName
-                    });
-
+                    const dbConnection = await mysql.createConnection({ ...this.credentials, database: databaseName });
                     try {
                         const [result] = await dbConnection.query(finalQuery);
-
-                        // Handle different query types
                         if (finalQuery.trim().toUpperCase().startsWith('SELECT') ||
                             finalQuery.trim().toUpperCase().startsWith('SHOW') ||
                             finalQuery.trim().toUpperCase().startsWith('DESCRIBE') ||
                             finalQuery.trim().toUpperCase().startsWith('EXPLAIN')) {
-                            return {
-                                type: 'SELECT',
-                                data: result,
-                                rowCount: result.length
-                            };
-                        } else {
-                            return {
-                                type: 'MODIFY',
-                                affectedRows: result.affectedRows || 0,
-                                insertId: result.insertId || null,
-                                message: 'Query executed successfully'
-                            };
+                            return { type: 'SELECT', data: result, rowCount: result.length };
                         }
+                        return { type: 'MODIFY', affectedRows: result.affectedRows || 0, insertId: result.insertId || null, message: 'Query executed successfully' };
                     } finally {
                         await dbConnection.end();
                     }
                 }
             }
 
-            // Execute query without database context (for queries that don't need it)
             const [result] = await this.connection.query(finalQuery);
-
-            // Handle different query types
             if (finalQuery.trim().toUpperCase().startsWith('SELECT') ||
                 finalQuery.trim().toUpperCase().startsWith('SHOW') ||
                 finalQuery.trim().toUpperCase().startsWith('DESCRIBE') ||
                 finalQuery.trim().toUpperCase().startsWith('EXPLAIN')) {
-                return {
-                    type: 'SELECT',
-                    data: result,
-                    rowCount: result.length
-                };
-            } else {
-                return {
-                    type: 'MODIFY',
-                    affectedRows: result.affectedRows || 0,
-                    insertId: result.insertId || null,
-                    message: 'Query executed successfully'
-                };
+                return { type: 'SELECT', data: result, rowCount: result.length };
             }
+            return { type: 'MODIFY', affectedRows: result.affectedRows || 0, insertId: result.insertId || null, message: 'Query executed successfully' };
         } catch (error) {
             throw new Error(`Query execution failed: ${error.message}`);
         }
     }
 
     async createDatabase(databaseName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            await this.connection.query(`CREATE DATABASE ${escapedDatabase}`);
+            if (this.engine === 'postgresql') {
+                await this.connection.query(`CREATE DATABASE ${this._pgEscapeId(databaseName)}`);
+            } else {
+                await this.connection.query(`CREATE DATABASE ${this.connection.escapeId(databaseName)}`);
+            }
         } catch (error) {
             throw new Error(`Failed to create database: ${error.message}`);
         }
     }
 
     async dropDatabase(databaseName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            await this.connection.query(`DROP DATABASE ${escapedDatabase}`);
+            if (this.engine === 'postgresql') {
+                await this.connection.query(`DROP DATABASE IF EXISTS ${this._pgEscapeId(databaseName)}`);
+            } else {
+                await this.connection.query(`DROP DATABASE ${this.connection.escapeId(databaseName)}`);
+            }
         } catch (error) {
             throw new Error(`Failed to drop database: ${error.message}`);
         }
     }
 
     async createTable(databaseName, createTableQuery) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            // Modify the CREATE TABLE query to include database name if not present
-            let finalQuery = createTableQuery;
-            if (databaseName && !createTableQuery.includes(`${databaseName}.`)) {
-                // This is a simple approach - for production, use a proper SQL parser
-                finalQuery = createTableQuery.replace(/CREATE TABLE\s+`?(\w+)`?/i,
-                    `CREATE TABLE \`${databaseName}\`.\`$1\``);
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try { await client.query(createTableQuery); } finally { await client.end(); }
+            } else {
+                let finalQuery = createTableQuery;
+                if (databaseName && !createTableQuery.includes(`${databaseName}.`)) {
+                    finalQuery = createTableQuery.replace(/CREATE TABLE\s+`?(\w+)`?/i,
+                        `CREATE TABLE \`${databaseName}\`.\`$1\``);
+                }
+                await this.connection.execute(finalQuery);
             }
-            await this.connection.execute(finalQuery);
         } catch (error) {
             throw new Error(`Failed to create table: ${error.message}`);
         }
     }
 
     async dropTable(databaseName, tableName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const escapedTable = this.connection.escapeId(tableName);
-            await this.connection.query(`DROP TABLE ${escapedDatabase}.${escapedTable}`);
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    await client.query(`DROP TABLE IF EXISTS ${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`);
+                } finally { await client.end(); }
+            } else {
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const escapedTable = this.connection.escapeId(tableName);
+                await this.connection.query(`DROP TABLE ${escapedDatabase}.${escapedTable}`);
+            }
         } catch (error) {
             throw new Error(`Failed to drop table: ${error.message}`);
         }
     }
 
     async alterTable(databaseName, tableName, alterQuery) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            // Create database-specific connection
-            const dbConnection = await mysql.createConnection({
-                ...this.credentials,
-                database: databaseName
-            });
-
-            try {
-                await dbConnection.query(alterQuery);
-            } finally {
-                await dbConnection.end();
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try { await client.query(alterQuery); } finally { await client.end(); }
+            } else {
+                const dbConnection = await mysql.createConnection({ ...this.credentials, database: databaseName });
+                try { await dbConnection.query(alterQuery); } finally { await dbConnection.end(); }
             }
         } catch (error) {
             throw new Error(`Failed to alter table: ${error.message}`);
@@ -401,70 +476,109 @@ class DatabaseManager {
     }
 
     async getTableIndexes(databaseName, tableName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const escapedTable = this.connection.escapeId(tableName);
-            const [rows] = await this.connection.query(`SHOW INDEX FROM ${escapedDatabase}.${escapedTable}`);
-            return rows;
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const result = await client.query(
+                        `SELECT
+                            i.relname AS "Key_name",
+                            a.attname AS "Column_name",
+                            NOT ix.indisunique AS "Non_unique",
+                            am.amname AS "Index_type",
+                            NULL AS "Cardinality"
+                         FROM pg_class t
+                         JOIN pg_index ix ON t.oid = ix.indrelid
+                         JOIN pg_class i ON i.oid = ix.indexrelid
+                         JOIN pg_am am ON i.relam = am.oid
+                         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                         WHERE t.relname = $1 AND t.relkind = 'r'
+                         ORDER BY i.relname, a.attnum`,
+                        [tableName]
+                    );
+                    return result.rows;
+                } finally { await client.end(); }
+            } else {
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const escapedTable = this.connection.escapeId(tableName);
+                const [rows] = await this.connection.query(`SHOW INDEX FROM ${escapedDatabase}.${escapedTable}`);
+                return rows;
+            }
         } catch (error) {
             throw new Error(`Failed to get table indexes: ${error.message}`);
         }
     }
 
     async getTableConstraints(databaseName, tableName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            const query = `
-                SELECT 
-                    CONSTRAINT_NAME,
-                    CONSTRAINT_TYPE,
-                    COLUMN_NAME,
-                    REFERENCED_TABLE_NAME,
-                    REFERENCED_COLUMN_NAME
-                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-                JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc 
-                    ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME 
-                    AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
-                WHERE kcu.TABLE_SCHEMA = ? AND kcu.TABLE_NAME = ?
-                ORDER BY kcu.ORDINAL_POSITION
-            `;
-
-            const [rows] = await this.connection.query(query, [databaseName, tableName]);
-            return rows;
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const result = await client.query(
+                        `SELECT
+                            tc.constraint_name AS "CONSTRAINT_NAME",
+                            tc.constraint_type AS "CONSTRAINT_TYPE",
+                            kcu.column_name AS "COLUMN_NAME",
+                            ccu.table_name AS "REFERENCED_TABLE_NAME",
+                            ccu.column_name AS "REFERENCED_COLUMN_NAME"
+                         FROM information_schema.table_constraints tc
+                         JOIN information_schema.key_column_usage kcu
+                             ON tc.constraint_name = kcu.constraint_name
+                             AND tc.table_schema = kcu.table_schema
+                         LEFT JOIN information_schema.constraint_column_usage ccu
+                             ON tc.constraint_name = ccu.constraint_name
+                             AND tc.table_schema = ccu.table_schema
+                         WHERE tc.table_schema = 'public' AND tc.table_name = $1
+                         ORDER BY kcu.ordinal_position`,
+                        [tableName]
+                    );
+                    return result.rows;
+                } finally { await client.end(); }
+            } else {
+                const query = `
+                    SELECT
+                        CONSTRAINT_NAME,
+                        CONSTRAINT_TYPE,
+                        COLUMN_NAME,
+                        REFERENCED_TABLE_NAME,
+                        REFERENCED_COLUMN_NAME
+                    FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                    JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                        ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+                        AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+                    WHERE kcu.TABLE_SCHEMA = ? AND kcu.TABLE_NAME = ?
+                    ORDER BY kcu.ORDINAL_POSITION
+                `;
+                const [rows] = await this.connection.query(query, [databaseName, tableName]);
+                return rows;
+            }
         } catch (error) {
             throw new Error(`Failed to get table constraints: ${error.message}`);
         }
     }
 
     async exportDatabase(databaseName, options = {}) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         const { includeData = true, selectedTables = null, exportMethod = 'single', separateData = false } = options;
 
         try {
-            // Get tables
             const tables = selectedTables || await this.getTables(databaseName);
+            const engineLabel = this.engine === 'postgresql' ? 'PostgreSQL' : 'MySQL';
 
-            // Case 1: Single file, no separation of data needed
             if (exportMethod === 'single' && !separateData) {
-                let sqlContent = '';
-                // Add header comment
-                sqlContent += `-- Database Export: ${databaseName}\n`;
+                let sqlContent = `-- Database Export: ${databaseName}\n`;
                 sqlContent += `-- Generated on: ${new Date().toISOString()}\n`;
-                sqlContent += `-- MySQL Handler Export\n\n`;
+                sqlContent += `-- ${engineLabel} Database Manager Export\n\n`;
 
-                // Create database statement
-                sqlContent += `CREATE DATABASE IF NOT EXISTS \`${databaseName}\`;\n`;
-                sqlContent += `USE \`${databaseName}\`;\n\n`;
+                if (this.engine === 'postgresql') {
+                    sqlContent += `-- Connect to the target database before running these statements\n\n`;
+                } else {
+                    sqlContent += `CREATE DATABASE IF NOT EXISTS \`${databaseName}\`;\n`;
+                    sqlContent += `USE \`${databaseName}\`;\n\n`;
+                }
 
                 for (const tableName of tables) {
                     sqlContent += await this.exportTable(databaseName, tableName, { includeData });
@@ -479,14 +593,8 @@ class DatabaseManager {
                 };
             }
 
-            // Case 2: Multi-file (ZIP required)
-            // Either separated by table OR separated data/structure OR both
-
             return new Promise(async (resolve, reject) => {
-                const archive = archiver('zip', {
-                    zlib: { level: 9 } // Sets the compression level.
-                });
-
+                const archive = archiver('zip', { zlib: { level: 9 } });
                 const chunks = [];
                 const output = new PassThrough();
 
@@ -503,44 +611,31 @@ class DatabaseManager {
 
                 archive.on('error', (err) => reject(err));
                 archive.pipe(output);
-
-                // Add main read me or info
                 archive.append(`Database Export: ${databaseName}\nGenerated on: ${new Date().toISOString()}\n`, { name: 'info.txt' });
 
                 if (exportMethod === 'single' && separateData) {
-                    // Single file export but structure and data separated
-                    let structureContent = `CREATE DATABASE IF NOT EXISTS \`${databaseName}\`;\nUSE \`${databaseName}\`;\n\n`;
-                    let dataContent = `USE \`${databaseName}\`;\n\n`;
+                    let structureContent = this.engine === 'postgresql'
+                        ? `-- Connect to the target database before running\n\n`
+                        : `CREATE DATABASE IF NOT EXISTS \`${databaseName}\`;\nUSE \`${databaseName}\`;\n\n`;
+                    let dataContent = this.engine === 'postgresql'
+                        ? `-- Data export\n\n`
+                        : `USE \`${databaseName}\`;\n\n`;
 
                     for (const tableName of tables) {
-                        // Structure
-                        const tableStruct = await this.exportTable(databaseName, tableName, { includeData: false });
-                        structureContent += tableStruct + '\n';
-
-                        // Data
+                        structureContent += await this.exportTable(databaseName, tableName, { includeData: false }) + '\n';
                         if (includeData) {
-                            const tableData = await this.exportTableDataOnly(databaseName, tableName);
-                            dataContent += tableData + '\n';
+                            dataContent += await this.exportTableDataOnly(databaseName, tableName) + '\n';
                         }
                     }
 
                     archive.append(structureContent, { name: 'structure.sql' });
-                    if (includeData) {
-                        archive.append(dataContent, { name: 'data.sql' });
-                    }
+                    if (includeData) archive.append(dataContent, { name: 'data.sql' });
 
                 } else if (exportMethod === 'split') {
-                    // Separate file per table
                     for (const tableName of tables) {
                         if (separateData) {
-                            // Split structure and data PER table
-                            const tableStruct = await this.exportTable(databaseName, tableName, { includeData: false });
-                            archive.append(tableStruct, { name: `${tableName}_structure.sql` });
-
-                            if (includeData) {
-                                const tableData = await this.exportTableDataOnly(databaseName, tableName);
-                                archive.append(tableData, { name: `${tableName}_data.sql` });
-                            }
+                            archive.append(await this.exportTable(databaseName, tableName, { includeData: false }), { name: `${tableName}_structure.sql` });
+                            if (includeData) archive.append(await this.exportTableDataOnly(databaseName, tableName), { name: `${tableName}_data.sql` });
                         } else {
                             // One file per table (structure + data)
                             const tableContent = await this.exportTable(databaseName, tableName, { includeData });
@@ -558,32 +653,94 @@ class DatabaseManager {
     }
 
     async exportTable(databaseName, tableName, options = {}) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         const { includeData = true, selectedRows = null, whereClause = null } = options;
         let sqlContent = '';
 
+        if (this.engine === 'postgresql') {
+            const client = await this._pgGetClient(databaseName);
+            try {
+                sqlContent += `-- Table structure for "${tableName}"\n`;
+                sqlContent += `DROP TABLE IF EXISTS ${this._pgEscapeId(tableName)};\n`;
+
+                // Build CREATE TABLE from information_schema
+                const colsResult = await client.query(
+                    `SELECT column_name, data_type, character_maximum_length, numeric_precision,
+                            numeric_scale, is_nullable, column_default
+                     FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = $1
+                     ORDER BY ordinal_position`,
+                    [tableName]
+                );
+
+                const pkResult = await client.query(
+                    `SELECT ku.column_name FROM information_schema.table_constraints tc
+                     JOIN information_schema.key_column_usage ku
+                         ON tc.constraint_name = ku.constraint_name AND tc.table_schema = ku.table_schema
+                     WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public' AND tc.table_name = $1`,
+                    [tableName]
+                );
+                const pkColumns = new Set(pkResult.rows.map(r => r.column_name));
+
+                const colDefs = colsResult.rows.map(c => {
+                    let typeDef = c.data_type;
+                    if (c.character_maximum_length) typeDef += `(${c.character_maximum_length})`;
+                    else if (c.numeric_precision && c.numeric_scale) typeDef += `(${c.numeric_precision},${c.numeric_scale})`;
+                    let colDef = `  ${this._pgEscapeId(c.column_name)} ${typeDef}`;
+                    if (c.is_nullable === 'NO') colDef += ' NOT NULL';
+                    if (c.column_default !== null) colDef += ` DEFAULT ${c.column_default}`;
+                    return colDef;
+                });
+
+                if (pkColumns.size > 0) {
+                    const pkCols = [...pkColumns].map(c => this._pgEscapeId(c)).join(', ');
+                    colDefs.push(`  PRIMARY KEY (${pkCols})`);
+                }
+
+                sqlContent += `CREATE TABLE ${this._pgEscapeId(tableName)} (\n${colDefs.join(',\n')}\n);\n\n`;
+
+                if (includeData) {
+                    sqlContent += `-- Data for table "${tableName}"\n`;
+                    let dataQuery = `SELECT * FROM ${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    if (whereClause) dataQuery += ` WHERE ${whereClause}`;
+                    const dataResult = await client.query(dataQuery);
+                    let rows = dataResult.rows;
+                    if (selectedRows && Array.isArray(selectedRows)) {
+                        rows = rows.filter((_, i) => selectedRows.includes(i));
+                    }
+                    if (rows.length > 0) {
+                        const cols = Object.keys(rows[0]);
+                        const colsList = cols.map(c => this._pgEscapeId(c)).join(', ');
+                        const valueStrings = rows.map(row => {
+                            const vals = cols.map(col => this._pgEscapeLiteral(row[col]));
+                            return `(${vals.join(', ')})`;
+                        });
+                        sqlContent += `INSERT INTO ${this._pgEscapeId(tableName)} (${colsList}) VALUES\n`;
+                        sqlContent += valueStrings.join(',\n') + ';\n';
+                    }
+                }
+            } finally {
+                await client.end();
+            }
+            return sqlContent;
+        }
+
+        // ── MySQL path ──────────────────────────────────────────────────────────
         let oldSqlMode = null;
 
         try {
-            // Save current SQL mode and set to safe mode (excludes ANSI_QUOTES)
             try {
                 const [modeResult] = await this.connection.query("SELECT @@SESSION.sql_mode as mode");
-                if (modeResult && modeResult.length > 0) {
-                    oldSqlMode = modeResult[0].mode;
-                }
+                if (modeResult && modeResult.length > 0) oldSqlMode = modeResult[0].mode;
                 await this.connection.query("SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'");
             } catch (modeError) {
                 console.warn('Warning: Failed to set safe SQL mode for export:', modeError.message);
             }
 
-            // Add table header comment
             sqlContent += `-- Table structure for \`${tableName}\`\n`;
             sqlContent += `DROP TABLE IF EXISTS \`${tableName}\`;\n`;
 
-            // Get CREATE TABLE statement
             const [createResult] = await this.connection.query(
                 `SHOW CREATE TABLE \`${databaseName}\`.\`${tableName}\``
             );
@@ -658,26 +815,47 @@ class DatabaseManager {
     }
 
     async exportTableDataOnly(databaseName, tableName, options = {}) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
+        if (!this.connection) throw new Error('No database connection');
 
         const { whereClause = null, selectedRows = null } = options;
         let sqlContent = '';
+
+        if (this.engine === 'postgresql') {
+            const client = await this._pgGetClient(databaseName);
+            try {
+                sqlContent += `-- Data for table "${tableName}"\n`;
+                let dataQuery = `SELECT * FROM ${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                if (whereClause) dataQuery += ` WHERE ${whereClause}`;
+                const dataResult = await client.query(dataQuery);
+                let rows = dataResult.rows;
+                if (selectedRows && Array.isArray(selectedRows)) {
+                    rows = rows.filter((_, i) => selectedRows.includes(i));
+                }
+                if (rows.length > 0) {
+                    const cols = Object.keys(rows[0]);
+                    const colsList = cols.map(c => this._pgEscapeId(c)).join(', ');
+                    const valueStrings = rows.map(row => {
+                        const vals = cols.map(col => this._pgEscapeLiteral(row[col]));
+                        return `(${vals.join(', ')})`;
+                    });
+                    sqlContent += `INSERT INTO ${this._pgEscapeId(tableName)} (${colsList}) VALUES\n`;
+                    sqlContent += valueStrings.join(',\n') + ';\n';
+                }
+            } finally {
+                await client.end();
+            }
+            return sqlContent;
+        }
 
         try {
             sqlContent += `-- Data for table \`${tableName}\`\n`;
 
             let dataQuery = `SELECT * FROM \`${databaseName}\`.\`${tableName}\``;
-
-            if (whereClause) {
-                dataQuery += ` WHERE ${whereClause}`;
-            }
+            if (whereClause) dataQuery += ` WHERE ${whereClause}`;
 
             const [rows] = await this.connection.query(dataQuery);
 
             if (rows.length > 0) {
-                // Filter rows if specific rows are selected
                 let dataRows = rows;
                 if (selectedRows && Array.isArray(selectedRows)) {
                     dataRows = rows.filter((_, index) => selectedRows.includes(index));
@@ -694,13 +872,9 @@ class DatabaseManager {
                         const values = columns.map(col => {
                             const value = row[col];
                             if (value === null) return 'NULL';
-
-                            // Fix for Arrays/JSON objects, but preserve Dates
                             if (typeof value === 'object' && !(value instanceof Date)) {
-                                console.log(`Stringifying object for column ${col}:`, value);
                                 return this.connection.escape(JSON.stringify(value));
                             }
-
                             return this.connection.escape(value);
                         });
                         return `(${values.join(', ')})`;
@@ -717,47 +891,37 @@ class DatabaseManager {
     }
 
     async updateRow(databaseName, tableName, primaryKeyColumn, primaryKeyValue, updateData) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const escapedTable = this.connection.escapeId(tableName);
-
-            // Build SET clause
             const columns = Object.keys(updateData);
-            if (columns.length === 0) {
-                return; // Nothing to update
-            }
+            if (columns.length === 0) return;
 
-            const setClauses = columns.map(col => {
-                return `${this.connection.escapeId(col)} = ?`;
-            });
-            const values = columns.map(col => updateData[col]);
-
-            // Add PK to values for WHERE clause
-            values.push(primaryKeyValue);
-
-            // Check if Primary Key is being changed
-            const pkChanged = columns.includes(primaryKeyColumn) && updateData[primaryKeyColumn] != primaryKeyValue;
-
-            if (pkChanged) {
-                // Determine if we need to disable FK checks
-                // We'll wrap this in a transaction or just sequential execution since we have the connection
-                // BUT: We need to use 'this.connection.query' directly which might be shared?
-                // Actually, 'this.connection' is per socket (DatabaseManager instance per socket), ensuring isolation per user.
-
-                await this.connection.query('SET FOREIGN_KEY_CHECKS=0');
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
                 try {
-                    const query = `UPDATE ${escapedDatabase}.${escapedTable} SET ${setClauses.join(', ')} WHERE ${this.connection.escapeId(primaryKeyColumn)} = ?`;
-                    await this.connection.execute(query, values);
-                } finally {
-                    await this.connection.query('SET FOREIGN_KEY_CHECKS=1');
-                }
+                    const tableRef = `${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    const values = columns.map(col => updateData[col]);
+                    let paramIdx = 1;
+                    const setClauses = columns.map(col => `${this._pgEscapeId(col)} = $${paramIdx++}`);
+                    values.push(primaryKeyValue);
+                    const query = `UPDATE ${tableRef} SET ${setClauses.join(', ')} WHERE ${this._pgEscapeId(primaryKeyColumn)} = $${paramIdx}`;
+                    await client.query(query, values);
+                } finally { await client.end(); }
             } else {
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const escapedTable = this.connection.escapeId(tableName);
+                const setClauses = columns.map(col => `${this.connection.escapeId(col)} = ?`);
+                const values = columns.map(col => updateData[col]);
+                values.push(primaryKeyValue);
+                const pkChanged = columns.includes(primaryKeyColumn) && updateData[primaryKeyColumn] != primaryKeyValue;
                 const query = `UPDATE ${escapedDatabase}.${escapedTable} SET ${setClauses.join(', ')} WHERE ${this.connection.escapeId(primaryKeyColumn)} = ?`;
-                await this.connection.execute(query, values);
+                if (pkChanged) {
+                    await this.connection.query('SET FOREIGN_KEY_CHECKS=0');
+                    try { await this.connection.execute(query, values); }
+                    finally { await this.connection.query('SET FOREIGN_KEY_CHECKS=1'); }
+                } else {
+                    await this.connection.execute(query, values);
+                }
             }
         } catch (error) {
             throw new Error(`Failed to update row: ${error.message}`);
@@ -765,64 +929,70 @@ class DatabaseManager {
     }
 
     async deleteAllData(databaseName, tableName) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const escapedTable = this.connection.escapeId(tableName);
-            await this.connection.query(`TRUNCATE TABLE ${escapedDatabase}.${escapedTable}`);
-        } catch (error) {
-            // Fallback to DELETE FROM if TRUNCATE fails (e.g., foreign key constraints)
-            try {
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const tableRef = `${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    await client.query(`TRUNCATE TABLE ${tableRef}`);
+                } finally { await client.end(); }
+            } else {
                 const escapedDatabase = this.connection.escapeId(databaseName);
                 const escapedTable = this.connection.escapeId(tableName);
-                await this.connection.query(`DELETE FROM ${escapedDatabase}.${escapedTable}`);
-            } catch (deleteError) {
-                throw new Error(`Failed to delete all data: ${deleteError.message}`);
+                try {
+                    await this.connection.query(`TRUNCATE TABLE ${escapedDatabase}.${escapedTable}`);
+                } catch {
+                    await this.connection.query(`DELETE FROM ${escapedDatabase}.${escapedTable}`);
+                }
             }
+        } catch (error) {
+            throw new Error(`Failed to delete all data: ${error.message}`);
         }
     }
 
     async deleteRows(databaseName, tableName, targetColumn, targetValues) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
-        if (!Array.isArray(targetValues) || targetValues.length === 0) {
-            throw new Error('No rows specified for deletion');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
+        if (!Array.isArray(targetValues) || targetValues.length === 0) throw new Error('No rows specified for deletion');
         try {
-            const escapedDatabase = this.connection.escapeId(databaseName);
-            const escapedTable = this.connection.escapeId(tableName);
-            const escapedColumn = this.connection.escapeId(targetColumn);
-
-            // Create a placeholder string based on the number of values
-            const placeholders = targetValues.map(() => '?').join(',');
-
-            const query = `DELETE FROM ${escapedDatabase}.${escapedTable} WHERE ${escapedColumn} IN (${placeholders})`;
-
-            await this.connection.query(query, targetValues);
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const tableRef = `${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    const col = this._pgEscapeId(targetColumn);
+                    const placeholders = targetValues.map((_, i) => `$${i + 1}`).join(', ');
+                    await client.query(`DELETE FROM ${tableRef} WHERE ${col} IN (${placeholders})`, targetValues);
+                } finally { await client.end(); }
+            } else {
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const escapedTable = this.connection.escapeId(tableName);
+                const escapedColumn = this.connection.escapeId(targetColumn);
+                const placeholders = targetValues.map(() => '?').join(',');
+                await this.connection.query(`DELETE FROM ${escapedDatabase}.${escapedTable} WHERE ${escapedColumn} IN (${placeholders})`, targetValues);
+            }
         } catch (error) {
             throw new Error(`Failed to delete rows: ${error.message}`);
         }
     }
 
     async getRowCount(databaseName, tableName, whereClause = null) {
-        if (!this.connection) {
-            throw new Error('No database connection');
-        }
-
+        if (!this.connection) throw new Error('No database connection');
         try {
-            let query = `SELECT COUNT(*) as count FROM \`${databaseName}\`.\`${tableName}\``;
-            if (whereClause) {
-                query += ` WHERE ${whereClause}`;
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const tableRef = `${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    let query = `SELECT COUNT(*) AS count FROM ${tableRef}`;
+                    if (whereClause) query += ` WHERE ${whereClause}`;
+                    const result = await client.query(query);
+                    return parseInt(result.rows[0].count, 10);
+                } finally { await client.end(); }
+            } else {
+                let query = `SELECT COUNT(*) as count FROM \`${databaseName}\`.\`${tableName}\``;
+                if (whereClause) query += ` WHERE ${whereClause}`;
+                const [result] = await this.connection.query(query);
+                return result[0].count;
             }
-
-            const [result] = await this.connection.query(query);
-            return result[0].count;
         } catch (error) {
             throw new Error(`Failed to get row count: ${error.message}`);
         }

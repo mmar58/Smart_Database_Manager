@@ -37,6 +37,11 @@ const queryDatabase = document.getElementById('queryDatabase');
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function () {
+    // Restore engine selection from localStorage
+    const savedEngine = localStorage.getItem('db_engine') || 'mysql';
+    const engineSelect = document.getElementById('engine');
+    engineSelect.value = savedEngine;
+
     setupEventListeners();
     setupSocketListeners();
     restoreSessionCredentials();
@@ -59,6 +64,18 @@ function setupEventListeners() {
         } else {
             advancedOptions.style.display = 'none';
             icon.textContent = '▼';
+        }
+    });
+
+    // Engine selection — save to localStorage and update default port
+    document.getElementById('engine').addEventListener('change', function () {
+        const engine = this.value;
+        localStorage.setItem('db_engine', engine);
+        const portEl = document.getElementById('port');
+        if (engine === 'postgresql' && portEl.value === '3306') {
+            portEl.value = '5432';
+        } else if (engine === 'mysql' && portEl.value === '5432') {
+            portEl.value = '3306';
         }
     });
 
@@ -168,6 +185,7 @@ function setupSocketListeners() {
                     port: currentCredentials.port,
                     username: currentCredentials.user,
                     password: currentCredentials.password,
+                    engine: currentCredentials.engine,
                     ssl: currentCredentials.ssl
                 })
             })
@@ -300,6 +318,7 @@ function handleConnection(e) {
         port: parseInt(formData.get('port')),
         user: formData.get('user'),
         password: formData.get('password'),
+        engine: document.getElementById('engine').value,
         ssl: null
     };
 
@@ -364,7 +383,8 @@ function loadSavedConnections() {
         savedConnections.forEach((conn, index) => {
             const option = document.createElement('option');
             option.value = index;
-            option.textContent = `${conn.user}@${conn.host}:${conn.port}`;
+            const engineLabel = (conn.engine === 'postgresql') ? 'PG' : 'MySQL';
+            option.textContent = `[${engineLabel}] ${conn.user}@${conn.host}:${conn.port}`;
             select.appendChild(option);
         });
     } else {
@@ -386,6 +406,12 @@ function fillConnectionForm() {
         document.getElementById('port').value = conn.port;
         document.getElementById('user').value = conn.user;
         document.getElementById('password').value = conn.password;
+
+        // Restore engine selection
+        if (conn.engine) {
+            document.getElementById('engine').value = conn.engine;
+            localStorage.setItem('db_engine', conn.engine);
+        }
 
         // Handle SSL fields if present
         if (conn.ssl) {
@@ -2191,6 +2217,12 @@ function restoreSessionCredentials() {
                 if (data.host) document.getElementById('host').value = data.host;
                 if (data.port) document.getElementById('port').value = data.port;
 
+                // Restore engine selection
+                if (data.engine) {
+                    document.getElementById('engine').value = data.engine;
+                    localStorage.setItem('db_engine', data.engine);
+                }
+
                 // Handle SSL fields if present
                 if (data.ssl) {
                     if (data.ssl.ca) document.getElementById('sslCa').value = data.ssl.ca;
@@ -2212,6 +2244,7 @@ function restoreSessionCredentials() {
                     port: parseInt(data.port || document.getElementById('port').value),
                     user: data.username,
                     password: data.password,
+                    engine: data.engine || 'mysql',
                     ssl: data.ssl || null
                 };
 

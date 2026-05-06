@@ -777,6 +777,11 @@ select {
     color: #495057;
 }
 
+.engine-select {
+    font-weight: 600;
+    cursor: pointer;
+}
+
 .saved-connections-controls {
     display: flex;
     gap: 10px;
