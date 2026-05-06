@@ -12,7 +12,16 @@
 <body>
     <div class="container">
         <header>
-            <h1>Database Manager</h1>
+            <div class="site-header-left">
+                <button type="button" class="site-back-btn" onclick="history.back()" aria-label="Go back">← Back</button>
+                <div class="site-title-group">
+                    <div class="site-title-row">
+                        <h1>HQ Main Gate</h1>
+                        <span class="site-state-pill">Active</span>
+                    </div>
+                    <span class="site-meta-pop">Commercial</span>
+                </div>
+            </div>
             <div class="header-controls">
                 <div class="connection-status" id="connectionStatus">
                     <span class="status-indicator disconnected"></span>
