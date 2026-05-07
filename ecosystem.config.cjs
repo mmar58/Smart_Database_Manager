@@ -6,7 +6,8 @@ module.exports = {
             watch: false,
             env: {
                 NODE_ENV: "development",
-                PORT: 3333
+                PORT: 3333,
+                JWT_SECRET_KEY: "securityHardToFind#5801"
             }
         }
     ]
