@@ -360,8 +360,9 @@ io.on('connection', (socket) => {
 
         try {
             const tableContent = await dbManager.exportTable(database, table, options);
+            const ext = options.format === 'json' ? 'json' : 'sql';
             const exportResult = {
-                filename: `${table}_export_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.sql`,
+                filename: `${table}_export_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.${ext}`,
                 content: tableContent,
                 size: Buffer.byteLength(tableContent, 'utf8')
             };

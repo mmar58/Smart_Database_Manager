@@ -559,14 +559,153 @@ class DatabaseManager {
         }
     }
 
+    _buildExportWhereClause({ whereClause = null, searchFilters = null, searchLogic = 'AND', selectedPKValues = null, pkColumn = null } = {}) {
+        if (whereClause) return whereClause;
+
+        if (selectedPKValues && pkColumn && selectedPKValues.length > 0) {
+            if (this.engine === 'postgresql') {
+                const escaped = selectedPKValues.map(v => this._pgEscapeLiteral(v)).join(', ');
+                return `${this._pgEscapeId(pkColumn)} IN (${escaped})`;
+            } else {
+                const escaped = selectedPKValues.map(v => this.connection.escape(v)).join(', ');
+                return `${this.connection.escapeId(pkColumn)} IN (${escaped})`;
+            }
+        }
+
+        if (searchFilters && Array.isArray(searchFilters) && searchFilters.length > 0) {
+            const validFilters = searchFilters.filter(f => f.column && f.value !== undefined && f.value !== '');
+            if (validFilters.length > 0) {
+                const logic = searchLogic === 'OR' ? 'OR' : 'AND';
+                if (this.engine === 'postgresql') {
+                    const conditions = validFilters.map(f => {
+                        const col = this._pgEscapeId(f.column);
+                        const op = f.operator === 'NOT LIKE' ? 'NOT ILIKE' : 'ILIKE';
+                        const val = f.value.replace(/'/g, "''");
+                        return `${col}::text ${op} '%${val}%'`;
+                    });
+                    return conditions.join(` ${logic} `);
+                } else {
+                    const conditions = validFilters.map(f => {
+                        const col = this.connection.escapeId(f.column);
+                        const val = this.connection.escape(`%${f.value}%`);
+                        const op = f.operator === 'NOT LIKE' ? 'NOT LIKE' : 'LIKE';
+                        return `${col} ${op} ${val}`;
+                    });
+                    return conditions.join(` ${logic} `);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    async _exportTableAsJson(databaseName, tableName, options = {}) {
+        const { includeData = true, selectedRows = null } = options;
+        const whereClause = this._buildExportWhereClause(options);
+        const result = { table: tableName, structure: [], data: [] };
+
+        if (this.engine === 'postgresql') {
+            const client = await this._pgGetClient(databaseName);
+            try {
+                const colsResult = await client.query(
+                    `SELECT column_name, data_type, is_nullable, column_default
+                     FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = $1
+                     ORDER BY ordinal_position`,
+                    [tableName]
+                );
+                result.structure = colsResult.rows;
+
+                if (includeData) {
+                    let dataQuery = `SELECT * FROM ${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    if (whereClause) dataQuery += ` WHERE ${whereClause}`;
+                    const dataResult = await client.query(dataQuery);
+                    let rows = dataResult.rows;
+                    if (selectedRows && Array.isArray(selectedRows)) {
+                        rows = rows.filter((_, i) => selectedRows.includes(i));
+                    }
+                    result.data = rows;
+                }
+            } finally {
+                await client.end();
+            }
+        } else {
+            const [columns] = await this.connection.query(
+                `SHOW COLUMNS FROM \`${databaseName}\`.\`${tableName}\``
+            );
+            result.structure = columns;
+
+            if (includeData) {
+                let dataQuery = `SELECT * FROM \`${databaseName}\`.\`${tableName}\``;
+                if (whereClause) dataQuery += ` WHERE ${whereClause}`;
+                const [rows] = await this.connection.query(dataQuery);
+                let dataRows = rows;
+                if (selectedRows && Array.isArray(selectedRows)) {
+                    dataRows = rows.filter((_, i) => selectedRows.includes(i));
+                }
+                result.data = dataRows;
+            }
+        }
+
+        return JSON.stringify(result, null, 2);
+    }
+
     async exportDatabase(databaseName, options = {}) {
         if (!this.connection) throw new Error('No database connection');
 
-        const { includeData = true, selectedTables = null, exportMethod = 'single', separateData = false } = options;
+        const { includeData = true, selectedTables = null, exportMethod = 'single', separateData = false, format = 'sql' } = options;
 
         try {
             const tables = selectedTables || await this.getTables(databaseName);
             const engineLabel = this.engine === 'postgresql' ? 'PostgreSQL' : 'MySQL';
+
+            // JSON export path
+            if (format === 'json') {
+                const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+                if (exportMethod === 'single') {
+                    const dbExport = {
+                        database: databaseName,
+                        exported: new Date().toISOString(),
+                        engine: this.engine,
+                        tables: {}
+                    };
+                    for (const tableName of tables) {
+                        const tableJson = JSON.parse(await this._exportTableAsJson(databaseName, tableName, { includeData }));
+                        dbExport.tables[tableName] = { structure: tableJson.structure, data: tableJson.data };
+                    }
+                    const jsonContent = JSON.stringify(dbExport, null, 2);
+                    return {
+                        filename: `${databaseName}_export_${timestamp}.json`,
+                        content: jsonContent,
+                        size: Buffer.byteLength(jsonContent, 'utf8'),
+                        isZip: false
+                    };
+                } else {
+                    // Split: one JSON file per table in a ZIP
+                    return new Promise(async (resolve, reject) => {
+                        const archive = archiver('zip', { zlib: { level: 9 } });
+                        const chunks = [];
+                        const output = new PassThrough();
+                        output.on('data', (chunk) => chunks.push(chunk));
+                        output.on('end', () => {
+                            const resultBuffer = Buffer.concat(chunks);
+                            resolve({
+                                filename: `${databaseName}_export_${timestamp}.zip`,
+                                content: resultBuffer,
+                                size: resultBuffer.length,
+                                isZip: true
+                            });
+                        });
+                        archive.on('error', (err) => reject(err));
+                        archive.pipe(output);
+                        for (const tableName of tables) {
+                            const tableJson = await this._exportTableAsJson(databaseName, tableName, { includeData });
+                            archive.append(tableJson, { name: `${tableName}.json` });
+                        }
+                        await archive.finalize();
+                    });
+                }
+            }
 
             if (exportMethod === 'single' && !separateData) {
                 let sqlContent = `-- Database Export: ${databaseName}\n`;
@@ -655,7 +794,13 @@ class DatabaseManager {
     async exportTable(databaseName, tableName, options = {}) {
         if (!this.connection) throw new Error('No database connection');
 
-        const { includeData = true, selectedRows = null, whereClause = null } = options;
+        const { includeData = true, selectedRows = null, format = 'sql' } = options;
+        const whereClause = this._buildExportWhereClause(options);
+
+        if (format === 'json') {
+            return this._exportTableAsJson(databaseName, tableName, { ...options, whereClause });
+        }
+
         let sqlContent = '';
 
         if (this.engine === 'postgresql') {

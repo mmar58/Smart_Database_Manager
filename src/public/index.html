@@ -510,6 +510,20 @@
                     <label>Database: <strong id="exportDbName"></strong></label>
                 </div>
                 <div class="form-group">
+                    <label>Export Format:</label>
+                    <div class="radio-group"
+                        style="margin-top: 0.5rem; display: flex; gap: 1.5rem;">
+                        <label>
+                            <input type="radio" name="exportFormat" value="sql" checked>
+                            SQL
+                        </label>
+                        <label>
+                            <input type="radio" name="exportFormat" value="json">
+                            JSON
+                        </label>
+                    </div>
+                </div>
+                <div class="form-group">
                     <label>Export Strategy:</label>
                     <div class="radio-group"
                         style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;">
@@ -572,6 +586,19 @@
                         <input type="checkbox" id="exportTableIncludeData" checked>
                         Include table data (structure only if unchecked)
                     </label>
+                </div>
+                <div class="form-group">
+                    <label>Export Format:</label>
+                    <div class="radio-group" style="margin-top: 0.5rem; display: flex; gap: 1.5rem;">
+                        <label>
+                            <input type="radio" name="tableExportFormat" value="sql" checked>
+                            SQL
+                        </label>
+                        <label>
+                            <input type="radio" name="tableExportFormat" value="json">
+                            JSON
+                        </label>
+                    </div>
                 </div>
                 <div id="dataExportOptions" class="form-group">
                     <label>Data Export Options:</label>

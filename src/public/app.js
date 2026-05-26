@@ -2512,6 +2512,7 @@ function exportDatabase(e) {
     const includeData = document.getElementById('exportIncludeData').checked;
     const separateData = document.getElementById('exportSeparateData').checked;
     const exportMethod = document.querySelector('input[name="exportMethod"]:checked').value;
+    const exportFormat = document.querySelector('input[name="exportFormat"]:checked').value;
     const selectedTables = Array.from(document.querySelectorAll('#exportTablesList input[type="checkbox"]:checked'))
         .map(cb => cb.value);
 
@@ -2528,7 +2529,8 @@ function exportDatabase(e) {
             includeData: includeData,
             separateData: separateData,
             exportMethod: exportMethod,
-            selectedTables: selectedTables
+            selectedTables: selectedTables,
+            format: exportFormat
         }
     });
 }
@@ -2538,15 +2540,18 @@ function exportTable(e) {
 
     const includeData = document.getElementById('exportTableIncludeData').checked;
     const dataExportType = document.querySelector('input[name="dataExportType"]:checked').value;
+    const tableExportFormat = document.querySelector('input[name="tableExportFormat"]:checked').value;
 
     let options = {
-        includeData: includeData
+        includeData: includeData,
+        format: tableExportFormat
     };
 
     if (includeData) {
         if (dataExportType === 'current') {
-            // Use current search/filter conditions
-            options.whereClause = buildCurrentWhereClause();
+            // Use current active search/filter conditions
+            options.searchFilters = currentSearchFilters.length > 0 ? currentSearchFilters : null;
+            options.searchLogic = currentSearchLogic;
         } else if (dataExportType === 'custom') {
             const customWhere = document.getElementById('exportWhereClause').value.trim();
             if (!customWhere) {
@@ -2568,17 +2573,41 @@ function exportTable(e) {
 }
 
 function buildCurrentWhereClause() {
-    // Build WHERE clause based on current search conditions
-    if (currentSearchColumn && currentSearchValue) {
-        return `\`${currentSearchColumn}\` LIKE '%${currentSearchValue}%'`;
-    }
+    // Legacy: returns null since we now use searchFilters directly
     return null;
 }
 
 function exportSelectedRows() {
-    showNotification('Row selection export feature coming soon!', 'info');
-    // This could be implemented to export only selected rows
-    // Would require adding checkboxes to each row and tracking selection
+    if (!currentDatabase || !currentTable) {
+        showNotification('Please select a table first', 'error');
+        return;
+    }
+
+    if (!currentPrimaryKey) {
+        showNotification('Cannot export: no Primary Key found on this table', 'error');
+        return;
+    }
+
+    const selectedCheckboxes = document.querySelectorAll('.row-checkbox:checked');
+    if (selectedCheckboxes.length === 0) {
+        showNotification('Please select at least one row to export', 'error');
+        return;
+    }
+
+    const pkValues = Array.from(selectedCheckboxes).map(cb => cb.value);
+
+    showNotification(`Exporting ${pkValues.length} selected row(s)...`, 'info');
+
+    socket.emit('export_table', {
+        database: currentDatabase,
+        table: currentTable,
+        options: {
+            includeData: true,
+            format: 'sql',
+            selectedPKValues: pkValues,
+            pkColumn: currentPrimaryKey
+        }
+    });
 }
 
 function exportCurrentData() {
@@ -2590,7 +2619,9 @@ function exportCurrentData() {
     // Quick export of current filtered data
     let options = {
         includeData: true,
-        whereClause: buildCurrentWhereClause()
+        format: 'sql',
+        searchFilters: currentSearchFilters.length > 0 ? currentSearchFilters : null,
+        searchLogic: currentSearchLogic
     };
 
     showNotification('Exporting current data... This may take a moment.', 'info');
