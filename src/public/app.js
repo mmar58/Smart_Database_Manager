@@ -185,6 +185,7 @@ function setupSocketListeners() {
                     port: currentCredentials.port,
                     username: currentCredentials.user,
                     password: currentCredentials.password,
+                    database: currentCredentials.database,
                     engine: currentCredentials.engine,
                     ssl: currentCredentials.ssl
                 })
@@ -318,6 +319,7 @@ function handleConnection(e) {
         port: parseInt(formData.get('port')),
         user: formData.get('user'),
         password: formData.get('password'),
+        database: formData.get('database') || undefined,
         engine: document.getElementById('engine').value,
         ssl: null
     };
@@ -406,6 +408,7 @@ function fillConnectionForm() {
         document.getElementById('port').value = conn.port;
         document.getElementById('user').value = conn.user;
         document.getElementById('password').value = conn.password;
+        if (conn.database) document.getElementById('database').value = conn.database;
 
         // Restore engine selection
         if (conn.engine) {

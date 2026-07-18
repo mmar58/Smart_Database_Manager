@@ -29,6 +29,7 @@ class DatabaseManager {
             port: credentials.port || (this.engine === 'postgresql' ? 5432 : 3306),
             user: credentials.user,
             password: credentials.password,
+            database: credentials.database,
             connectTimeout: 60000,
             ...(sslConfig && { ssl: sslConfig })
         };
@@ -38,9 +39,10 @@ class DatabaseManager {
 
     // ─── PostgreSQL helpers ───────────────────────────────────────────────────
 
-    /** Create a pg.Client connected to the given database (default: postgres) */
-    async _pgGetClient(database = 'postgres') {
-        const client = new PgClient({ ...this.pgBaseConfig, database });
+    /** Create a pg.Client connected to the given database */
+    async _pgGetClient(database) {
+        const dbName = database || this.credentials.database || 'postgres';
+        const client = new PgClient({ ...this.pgBaseConfig, database: dbName });
         await client.connect();
         return client;
     }
@@ -65,8 +67,8 @@ class DatabaseManager {
         try {
             if (this.engine === 'postgresql') {
                 console.log('Attempting PostgreSQL connection...');
-                // Connect to the default 'postgres' database to list all databases
-                this.connection = await this._pgGetClient('postgres');
+                // Connect to the initial database to list all databases
+                this.connection = await this._pgGetClient();
                 console.log('PostgreSQL connected successfully');
             } else {
                 if (this.credentials.ssl) {

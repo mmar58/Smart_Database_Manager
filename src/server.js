@@ -69,6 +69,7 @@ app.get('/session-credentials', (req, res) => {
             port: decoded.port,
             username: decoded.username,
             password: decoded.password,
+            database: decoded.database,
             ssl: decoded.ssl,
             engine: decoded.engine
         });
@@ -80,7 +81,7 @@ app.get('/session-credentials', (req, res) => {
 
 // API to store credentials in session (now generate JWT)
 app.post('/store-credentials', (req, res) => {
-    const { host, port, username, password, ssl, engine } = req.body;
+    const { host, port, username, password, database, ssl, engine } = req.body;
 
     // Create payload
     const payload = {
@@ -88,6 +89,7 @@ app.post('/store-credentials', (req, res) => {
         port,
         username,
         password,
+        database,
         ssl,
         engine
     };
