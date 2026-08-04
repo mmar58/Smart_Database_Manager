@@ -7,6 +7,11 @@ const path = require('path');
 const cors = require('cors');
 const DatabaseManager = require('./database/DatabaseManager');
 const jwt = require('jsonwebtoken');
+const fs = require('fs/promises');
+const fsSync = require('fs');
+const os = require('os');
+const cron = require('node-cron');
+const multer = require('multer');
 
 const app = express();
 
@@ -35,8 +40,9 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Increased limit for imports
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/backups', express.static(path.join(__dirname, '..', 'backups'))); // Serve backups for download
 
 // Store active database connections
 const activeConnections = new Map();
@@ -45,6 +51,71 @@ const activeConnections = new Map();
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+
+// Setup multer for backup uploads
+const upload = multer({ dest: path.join(__dirname, '..', 'backups') });
+
+// System Stats API
+app.get('/api/system-stats', (req, res) => {
+    const cpus = os.cpus();
+    let totalIdle = 0;
+    let totalTick = 0;
+    
+    cpus.forEach(cpu => {
+        for (let type in cpu.times) {
+            totalTick += cpu.times[type];
+        }
+        totalIdle += cpu.times.idle;
+    });
+    
+    const idle = totalIdle / cpus.length;
+    const total = totalTick / cpus.length;
+    
+    // CPU usage estimation
+    const usage = 100 - ~~(100 * idle / total);
+    
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    const memUsage = (usedMem / totalMem) * 100;
+
+    res.json({
+        cpuUsage: usage,
+        memUsage: memUsage.toFixed(2),
+        totalMem: (totalMem / 1024 / 1024 / 1024).toFixed(2) + ' GB',
+        usedMem: (usedMem / 1024 / 1024 / 1024).toFixed(2) + ' GB'
+    });
+});
+
+// Upload Backup Endpoint
+app.post('/api/upload-backup', upload.single('backupFile'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+    }
+    
+    // Rename to keep original name if possible
+    const originalName = req.file.originalname;
+    const newPath = path.join(__dirname, '..', 'backups', originalName);
+    
+    try {
+        await fs.rename(req.file.path, newPath);
+        res.json({ success: true, message: 'Backup uploaded successfully', filename: originalName });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to save uploaded file' });
+    }
+});
+
+// Settings Management
+const SETTINGS_FILE = path.join(__dirname, 'data', 'settings.json');
+const QUERY_HISTORY_FILE = path.join(__dirname, 'data', 'query_history.json');
+
+// Ensure data dirs exist
+if (!fsSync.existsSync(path.join(__dirname, 'data'))) {
+    fsSync.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+}
+if (!fsSync.existsSync(path.join(__dirname, '..', 'backups'))) {
+    fsSync.mkdirSync(path.join(__dirname, '..', 'backups'), { recursive: true });
+}
 
 // API to get last credentials from session
 // API to get last credentials from session (now via JWT)
@@ -438,6 +509,190 @@ io.on('connection', (socket) => {
         }
     });
 
+    // Import database
+    socket.on('import_database', async ({ database, content, type }) => {
+        const dbManager = activeConnections.get(socket.id);
+        if (!dbManager) {
+            socket.emit('error', { message: 'No active database connection' });
+            return;
+        }
+
+        try {
+            if (type === 'json') {
+                await dbManager.importDatabaseFromJson(database, content);
+            } else {
+                await dbManager.importDatabase(database, content);
+            }
+            socket.emit('database_imported', { message: 'Database imported successfully' });
+        } catch (error) {
+            socket.emit('error', { message: error.message });
+        }
+    });
+
+    // Insert row
+    socket.on('insert_row', async ({ database, table, rowData }) => {
+        const dbManager = activeConnections.get(socket.id);
+        if (!dbManager) {
+            socket.emit('error', { message: 'No active database connection' });
+            return;
+        }
+
+        try {
+            await dbManager.insertRow(database, table, rowData);
+            socket.emit('row_inserted', { message: 'Row inserted successfully' });
+        } catch (error) {
+            socket.emit('error', { message: error.message });
+        }
+    });
+
+    // Get DB sizes
+    socket.on('get_db_sizes', async () => {
+        const dbManager = activeConnections.get(socket.id);
+        if (!dbManager) return;
+        try {
+            const sizes = await dbManager.getDatabaseSizes();
+            socket.emit('db_sizes', sizes);
+        } catch (err) {
+            console.error(err);
+        }
+    });
+
+    // Get Table sizes
+    socket.on('get_table_sizes', async (database) => {
+        const dbManager = activeConnections.get(socket.id);
+        if (!dbManager) return;
+        try {
+            const sizes = await dbManager.getTableSizes(database);
+            socket.emit('table_sizes', { database, sizes });
+        } catch (err) {
+            console.error(err);
+        }
+    });
+
+    // Backup Settings
+    socket.on('get_settings', async () => {
+        try {
+            let settings = {};
+            if (fsSync.existsSync(SETTINGS_FILE)) {
+                settings = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
+            }
+            socket.emit('settings', settings);
+        } catch (err) {
+            console.error(err);
+        }
+    });
+
+    socket.on('save_settings', async (settings) => {
+        try {
+            await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+            socket.emit('settings_saved', { message: 'Settings saved' });
+            // Restart cron if auto backup changed
+            setupAutoBackup();
+        } catch (err) {
+            socket.emit('error', { message: 'Failed to save settings' });
+        }
+    });
+
+    // Backup Management
+    socket.on('list_backups', async () => {
+        try {
+            const backupsDir = path.join(__dirname, '..', 'backups');
+            if (!fsSync.existsSync(backupsDir)) {
+                socket.emit('backups_list', []);
+                return;
+            }
+            const files = await fs.readdir(backupsDir);
+            const backups = [];
+            for (const file of files) {
+                const stat = await fs.stat(path.join(backupsDir, file));
+                if (stat.isFile()) {
+                    backups.push({
+                        name: file,
+                        size: stat.size,
+                        date: stat.mtime
+                    });
+                }
+            }
+            backups.sort((a, b) => b.date - a.date);
+            socket.emit('backups_list', backups);
+        } catch (err) {
+            socket.emit('error', { message: 'Failed to list backups' });
+        }
+    });
+
+    socket.on('delete_backup', async (filename) => {
+        try {
+            await fs.unlink(path.join(__dirname, '..', 'backups', filename));
+            socket.emit('backup_deleted', { message: `Deleted ${filename}` });
+        } catch (err) {
+            socket.emit('error', { message: 'Failed to delete backup' });
+        }
+    });
+    
+    socket.on('restore_backup', async ({ filename, targetDatabase }) => {
+        const dbManager = activeConnections.get(socket.id);
+        if (!dbManager) {
+            socket.emit('error', { message: 'No active database connection' });
+            return;
+        }
+
+        try {
+            const filePath = path.join(__dirname, '..', 'backups', filename);
+            const content = await fs.readFile(filePath, 'utf8');
+            if (filename.endsWith('.json')) {
+                await dbManager.importDatabaseFromJson(targetDatabase, content);
+            } else if (filename.endsWith('.sql')) {
+                await dbManager.importDatabase(targetDatabase, content);
+            } else {
+                throw new Error('Unsupported backup format for direct restore');
+            }
+            socket.emit('backup_restored', { message: `Restored ${filename} to ${targetDatabase}` });
+        } catch (error) {
+            socket.emit('error', { message: `Failed to restore backup: ${error.message}` });
+        }
+    });
+
+    // Query History
+    socket.on('get_query_history', async () => {
+        try {
+            if (fsSync.existsSync(QUERY_HISTORY_FILE)) {
+                const history = JSON.parse(await fs.readFile(QUERY_HISTORY_FILE, 'utf8'));
+                socket.emit('query_history', history);
+            } else {
+                socket.emit('query_history', []);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    });
+
+    socket.on('save_query_history', async (queryObj) => {
+        try {
+            let history = [];
+            if (fsSync.existsSync(QUERY_HISTORY_FILE)) {
+                history = JSON.parse(await fs.readFile(QUERY_HISTORY_FILE, 'utf8'));
+            }
+            history.unshift({
+                ...queryObj,
+                timestamp: new Date().toISOString()
+            });
+            if (history.length > 200) history = history.slice(0, 200); // keep max 200
+            await fs.writeFile(QUERY_HISTORY_FILE, JSON.stringify(history, null, 2));
+            socket.emit('query_history', history);
+        } catch (err) {
+            console.error(err);
+        }
+    });
+    
+    socket.on('clear_query_history', async () => {
+        try {
+            await fs.writeFile(QUERY_HISTORY_FILE, JSON.stringify([]));
+            socket.emit('query_history', []);
+        } catch (err) {
+            console.error(err);
+        }
+    });
+
     // Handle client disconnect
     socket.on('disconnect', async () => {
         console.log('User disconnected:', socket.id);
@@ -459,6 +714,104 @@ app.post('/logout', (req, res) => {
     });
 });
 
+let currentCronJob = null;
+
+function setupAutoBackup() {
+    if (currentCronJob) {
+        currentCronJob.stop();
+        currentCronJob = null;
+    }
+
+    let settings = {};
+    if (fsSync.existsSync(SETTINGS_FILE)) {
+        try {
+            settings = JSON.parse(fsSync.readFileSync(SETTINGS_FILE, 'utf8'));
+        } catch (e) {}
+    }
+
+    if (settings.autoBackup && settings.autoBackup.enabled) {
+        let cronExpr = '0 0 * * *'; // Daily at midnight default
+        if (settings.autoBackup.interval === 'hourly') cronExpr = '0 * * * *';
+        else if (settings.autoBackup.interval === 'weekly') cronExpr = '0 0 * * 0';
+        else if (settings.autoBackup.cronExpression) cronExpr = settings.autoBackup.cronExpression;
+
+        currentCronJob = cron.schedule(cronExpr, async () => {
+            console.log('Running scheduled auto backup...');
+            
+            // Check CPU usage limit
+            const cpus = os.cpus();
+            let totalIdle = 0;
+            let totalTick = 0;
+            cpus.forEach(cpu => {
+                for (let type in cpu.times) totalTick += cpu.times[type];
+                totalIdle += cpu.times.idle;
+            });
+            const usage = 100 - ~~(100 * (totalIdle / cpus.length) / (totalTick / cpus.length));
+            const limit = settings.autoBackup.cpuLimit || 80;
+            
+            if (usage > limit) {
+                console.warn(`Auto backup skipped: CPU usage ${usage}% > limit ${limit}%`);
+                return;
+            }
+
+            try {
+                // Determine which connection to use (or instantiate a new one based on saved credentials if available)
+                const credentials = settings.autoBackup.credentials;
+                if (!credentials) {
+                    console.error('Auto backup failed: No credentials saved in settings');
+                    return;
+                }
+
+                const dbManager = new DatabaseManager(credentials);
+                await dbManager.connect();
+                
+                const dbName = credentials.database;
+                if (!dbName) {
+                    console.error('Auto backup failed: No target database specified in credentials');
+                    await dbManager.disconnect();
+                    return;
+                }
+                
+                const result = await dbManager.exportDatabase(dbName, { exportMethod: 'single', format: 'sql', includeData: true });
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const filename = `${dbName}_autobackup_${timestamp}.sql`;
+                const filePath = path.join(__dirname, '..', 'backups', filename);
+                
+                await fs.writeFile(filePath, result.content);
+                console.log(`Auto backup completed: ${filename}`);
+                
+                // Keep only N recent backups
+                const retention = settings.autoBackup.retention || 5;
+                const backupsDir = path.join(__dirname, '..', 'backups');
+                const files = await fs.readdir(backupsDir);
+                const backups = [];
+                for (const file of files) {
+                    if (file.includes('_autobackup_')) {
+                        const stat = await fs.stat(path.join(backupsDir, file));
+                        backups.push({ name: file, date: stat.mtimeMs });
+                    }
+                }
+                backups.sort((a, b) => b.date - a.date); // newest first
+                
+                if (backups.length > retention) {
+                    for (let i = retention; i < backups.length; i++) {
+                        await fs.unlink(path.join(backupsDir, backups[i].name));
+                        console.log(`Deleted old backup: ${backups[i].name}`);
+                    }
+                }
+                
+                await dbManager.disconnect();
+            } catch (err) {
+                console.error('Auto backup error:', err.message);
+            }
+        });
+    }
+}
+
+// Initial setup of auto backup
+setupAutoBackup();
+
+// Start server
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
     console.log(`Access the application at http://localhost:${PORT}`);

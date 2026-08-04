@@ -1144,6 +1144,136 @@ class DatabaseManager {
             throw new Error(`Failed to get row count: ${error.message}`);
         }
     }
+
+    async insertRow(databaseName, tableName, rowData) {
+        if (!this.connection) throw new Error('No database connection');
+        try {
+            const columns = Object.keys(rowData);
+            if (columns.length === 0) return;
+
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const tableRef = `${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`;
+                    const colsList = columns.map(c => this._pgEscapeId(c)).join(', ');
+                    const values = columns.map(col => rowData[col]);
+                    let paramIdx = 1;
+                    const placeholders = columns.map(() => `$${paramIdx++}`).join(', ');
+                    const query = `INSERT INTO ${tableRef} (${colsList}) VALUES (${placeholders})`;
+                    await client.query(query, values);
+                } finally { await client.end(); }
+            } else {
+                const escapedDatabase = this.connection.escapeId(databaseName);
+                const escapedTable = this.connection.escapeId(tableName);
+                const colsList = columns.map(c => this.connection.escapeId(c)).join(', ');
+                const placeholders = columns.map(() => '?').join(', ');
+                const values = columns.map(col => rowData[col]);
+                const query = `INSERT INTO ${escapedDatabase}.${escapedTable} (${colsList}) VALUES (${placeholders})`;
+                await this.connection.execute(query, values);
+            }
+        } catch (error) {
+            throw new Error(`Failed to insert row: ${error.message}`);
+        }
+    }
+
+    async importDatabase(databaseName, sqlContent) {
+        if (!this.connection) throw new Error('No database connection');
+        try {
+            // Our executeQuery method handles basic splitting of multiple statements
+            await this.executeQuery(databaseName, sqlContent);
+        } catch (error) {
+            throw new Error(`Failed to import database from SQL: ${error.message}`);
+        }
+    }
+
+    async importDatabaseFromJson(databaseName, jsonContent) {
+        if (!this.connection) throw new Error('No database connection');
+        try {
+            const data = typeof jsonContent === 'string' ? JSON.parse(jsonContent) : jsonContent;
+            
+            if (data && data.tables) {
+                for (const [tableName, tableData] of Object.entries(data.tables)) {
+                    if (tableData.data && tableData.data.length > 0) {
+                        for (const row of tableData.data) {
+                            try {
+                                await this.insertRow(databaseName, tableName, row);
+                            } catch (err) {
+                                console.error(`Error inserting row into ${tableName}:`, err.message);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            throw new Error(`Failed to import database from JSON: ${error.message}`);
+        }
+    }
+
+    async getDatabaseSizes() {
+        if (!this.connection) throw new Error('No database connection');
+        try {
+            if (this.engine === 'postgresql') {
+                const result = await this.connection.query(
+                    `SELECT datname as database, pg_database_size(datname) as size_bytes
+                     FROM pg_database WHERE datistemplate = false`
+                );
+                return result.rows.map(row => ({
+                    database: row.database,
+                    sizeMb: (parseInt(row.size_bytes) / 1024 / 1024).toFixed(2)
+                }));
+            } else {
+                const [rows] = await this.connection.query(
+                    `SELECT table_schema AS 'database', 
+                            SUM(data_length + index_length) AS 'size_bytes' 
+                     FROM information_schema.tables 
+                     GROUP BY table_schema`
+                );
+                return rows.map(row => ({
+                    database: row.database,
+                    sizeMb: (row.size_bytes / 1024 / 1024).toFixed(2)
+                }));
+            }
+        } catch (error) {
+            console.error(`Failed to get database sizes: ${error.message}`);
+            return []; // non-fatal
+        }
+    }
+
+    async getTableSizes(databaseName) {
+        if (!this.connection) throw new Error('No database connection');
+        try {
+            if (this.engine === 'postgresql') {
+                const client = await this._pgGetClient(databaseName);
+                try {
+                    const result = await client.query(
+                        `SELECT relname as table_name, pg_total_relation_size(C.oid) as size_bytes
+                         FROM pg_class C LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+                         WHERE nspname NOT IN ('pg_catalog', 'information_schema') AND C.relkind <> 'i' AND nspname !~ '^pg_toast'`
+                    );
+                    return result.rows.map(row => ({
+                        table: row.table_name,
+                        sizeMb: (parseInt(row.size_bytes) / 1024 / 1024).toFixed(2)
+                    }));
+                } finally {
+                    await client.end();
+                }
+            } else {
+                const escapedDatabase = this.connection.escape(databaseName);
+                const [rows] = await this.connection.query(
+                    `SELECT table_name, (data_length + index_length) AS size_bytes 
+                     FROM information_schema.tables 
+                     WHERE table_schema = ${escapedDatabase}`
+                );
+                return rows.map(row => ({
+                    table: row.table_name,
+                    sizeMb: (row.size_bytes / 1024 / 1024).toFixed(2)
+                }));
+            }
+        } catch (error) {
+            console.error(`Failed to get table sizes: ${error.message}`);
+            return []; // non-fatal
+        }
+    }
 }
 
 module.exports = DatabaseManager;

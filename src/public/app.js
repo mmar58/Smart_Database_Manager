@@ -175,6 +175,10 @@ function setupSocketListeners() {
         showMainInterface();
         loadDatabases();
 
+        // Load settings and query history for new features
+        socket.emit('get_settings');
+        socket.emit('get_query_history');
+
         // Store credentials in session
         if (currentCredentials) {
             fetch('/store-credentials', {
@@ -357,7 +361,9 @@ function saveConnection(credentials) {
     const existingIndex = savedConnections.findIndex(c =>
         c.host === credentials.host &&
         c.port === credentials.port &&
-        c.user === credentials.user
+        c.user === credentials.user &&
+        c.database === credentials.database &&
+        c.engine === credentials.engine
     );
 
     if (existingIndex !== -1) {
@@ -386,7 +392,11 @@ function loadSavedConnections() {
             const option = document.createElement('option');
             option.value = index;
             const engineLabel = (conn.engine === 'postgresql') ? 'PG' : 'MySQL';
-            option.textContent = `[${engineLabel}] ${conn.user}@${conn.host}:${conn.port}`;
+            let label = `[${engineLabel}] ${conn.user}@${conn.host}:${conn.port}`;
+            if (conn.database) {
+                label += `/${conn.database}`;
+            }
+            option.textContent = label;
             select.appendChild(option);
         });
     } else {
@@ -404,11 +414,11 @@ function fillConnectionForm() {
     const conn = savedConnections[index];
 
     if (conn) {
-        document.getElementById('host').value = conn.host;
-        document.getElementById('port').value = conn.port;
-        document.getElementById('user').value = conn.user;
-        document.getElementById('password').value = conn.password;
-        if (conn.database) document.getElementById('database').value = conn.database;
+        document.getElementById('host').value = conn.host || '';
+        document.getElementById('port').value = conn.port || '';
+        document.getElementById('user').value = conn.user || '';
+        document.getElementById('password').value = conn.password || '';
+        document.getElementById('database').value = conn.database || '';
 
         // Restore engine selection
         if (conn.engine) {
@@ -482,10 +492,12 @@ function showConnectionPanel() {
     mainInterface.style.display = 'none';
     logoutBtn.style.display = 'none';
 
-    // Hide export buttons
+    // Hide export/import buttons
     document.getElementById('exportDatabase').style.display = 'none';
+    document.getElementById('importDatabaseBtn').style.display = 'none';
     document.getElementById('exportCurrentData').style.display = 'none';
     document.getElementById('exportSelectedRows').style.display = 'none';
+    document.getElementById('insertRowBtn').style.display = 'none';
 
     // Reset interface
     currentDatabase = null;
@@ -541,8 +553,9 @@ function selectDatabase(database, element) {
     currentDatabase = database;
     currentTable = null;
 
-    // Show export button
+    // Show export/import buttons
     document.getElementById('exportDatabase').style.display = 'inline-block';
+    document.getElementById('importDatabaseBtn').style.display = 'inline-block';
 
     // Clear table list and data
     tableList.innerHTML = '';
@@ -571,9 +584,10 @@ function selectTable(table, element) {
     currentTable = table;
     selectedTableSpan.textContent = `${currentDatabase}.${table}`;
 
-    // Show export buttons
+    // Show export/insert buttons
     document.getElementById('exportCurrentData').style.display = 'inline-block';
     document.getElementById('exportSelectedRows').style.display = 'inline-block';
+    document.getElementById('insertRowBtn').style.display = 'inline-block';
 
     // Reset pagination
     currentTable = table;
@@ -1802,6 +1816,10 @@ function showCreateDatabaseModal() {
     document.getElementById('createDatabaseModal').style.display = 'block';
 }
 
+function showModal(modalId) {
+    document.getElementById(modalId).style.display = 'block';
+}
+
 function closeModal(modalId) {
     document.getElementById(modalId).style.display = 'none';
     // Clear form if it exists
@@ -2738,3 +2756,358 @@ window.copyToClipboard = copyToClipboard; // Make globally accessible for onclic
 window.selectAllTables = selectAllTables;
 window.deselectAllTables = deselectAllTables;
 window.previewRowCount = previewRowCount;
+window.closeModal = closeModal;
+window.showModal = showModal;
+
+
+// --- Database Maintainer Extensions --- //
+document.addEventListener('DOMContentLoaded', () => {
+    // 1. Settings Modal
+    document.getElementById('settingsBtn').addEventListener('click', () => {
+        socket.emit('get_settings');
+        showModal('settingsModal');
+    });
+
+    document.querySelectorAll('.settings-tab-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById(btn.dataset.tab).classList.add('active');
+        });
+    });
+
+    document.getElementById('settingAutoBackupEnabled').addEventListener('change', (e) => {
+        document.getElementById('autoBackupOptions').style.display = e.target.checked ? 'block' : 'none';
+    });
+
+    document.getElementById('settingsForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const settings = {
+            general: {
+                showSystemStats: document.getElementById('settingShowSystemStats').checked
+            },
+            autoBackup: {
+                enabled: document.getElementById('settingAutoBackupEnabled').checked,
+                interval: document.getElementById('settingAutoBackupInterval').value,
+                retention: parseInt(document.getElementById('settingAutoBackupRetention').value, 10),
+                cpuLimit: parseInt(document.getElementById('settingAutoBackupCpu').value, 10),
+                database: document.getElementById('settingAutoBackupDb').value,
+                credentials: currentCredentials
+            }
+        };
+        socket.emit('save_settings', settings);
+        
+        // Toggle system stats UI
+        document.getElementById('systemStats').style.display = settings.general.showSystemStats ? 'flex' : 'none';
+        if (settings.general.showSystemStats) startStatsPolling();
+        else stopStatsPolling();
+        
+        closeModal('settingsModal');
+    });
+
+    socket.on('settings', (settings) => {
+        if (settings.general) {
+            document.getElementById('settingShowSystemStats').checked = settings.general.showSystemStats;
+            document.getElementById('systemStats').style.display = settings.general.showSystemStats ? 'flex' : 'none';
+            if (settings.general.showSystemStats) startStatsPolling();
+        }
+        if (settings.autoBackup) {
+            document.getElementById('settingAutoBackupEnabled').checked = settings.autoBackup.enabled;
+            document.getElementById('autoBackupOptions').style.display = settings.autoBackup.enabled ? 'block' : 'none';
+            document.getElementById('settingAutoBackupInterval').value = settings.autoBackup.interval || 'daily';
+            document.getElementById('settingAutoBackupRetention').value = settings.autoBackup.retention || 5;
+            document.getElementById('settingAutoBackupCpu').value = settings.autoBackup.cpuLimit || 80;
+            setTimeout(() => {
+                const dbSelect = document.getElementById('settingAutoBackupDb');
+                dbSelect.innerHTML = '<option value="">Select Database</option>';
+                const dbs = Array.from(document.querySelectorAll('#databaseList li')).map(li => {
+                    const textNode = Array.from(li.childNodes).find(n => n.nodeType === 3);
+                    return textNode ? textNode.nodeValue.trim() : li.textContent.trim();
+                });
+                dbs.forEach(db => {
+                    if (db) {
+                        const opt = document.createElement('option');
+                        opt.value = db;
+                        opt.textContent = db;
+                        dbSelect.appendChild(opt);
+                    }
+                });
+                dbSelect.value = settings.autoBackup.database || '';
+            }, 500);
+        }
+    });
+
+    socket.on('settings_saved', (data) => {
+        showNotification(data.message, 'success');
+    });
+
+    // 2. System Stats Polling
+    let statsInterval = null;
+    function startStatsPolling() {
+        if (statsInterval) return;
+        statsInterval = setInterval(() => {
+            fetch('/api/system-stats').then(r => r.json()).then(data => {
+                document.getElementById('cpuBar').style.width = data.cpuUsage + '%';
+                document.getElementById('cpuText').textContent = data.cpuUsage + '%';
+                document.getElementById('memBar').style.width = data.memUsage + '%';
+                document.getElementById('memText').textContent = Math.round(data.memUsage) + '%';
+            }).catch(() => {});
+        }, 2000);
+    }
+    function stopStatsPolling() {
+        if (statsInterval) {
+            clearInterval(statsInterval);
+            statsInterval = null;
+        }
+    }
+
+    // 3. Backup History
+    document.getElementById('viewBackupHistoryBtn').addEventListener('click', () => {
+        closeModal('settingsModal');
+        socket.emit('list_backups');
+        showModal('backupHistoryModal');
+    });
+
+    socket.on('backups_list', (backups) => {
+        const tbody = document.querySelector('#backupHistoryTable tbody');
+        tbody.innerHTML = '';
+        if (backups.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4">No backups found.</td></tr>';
+            return;
+        }
+        backups.forEach(backup => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${backup.name}</td>
+                <td>${formatFileSize(backup.size)}</td>
+                <td>${new Date(backup.date).toLocaleString()}</td>
+                <td>
+                    <button class="btn btn-small btn-primary" onclick="downloadBackup('${backup.name}')">Download</button>
+                    <button class="btn btn-small btn-warning" onclick="restoreBackup('${backup.name}')">Restore</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteBackup('${backup.name}')">Delete</button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    });
+
+    window.downloadBackup = function(filename) {
+        window.location.href = '/backups/' + filename;
+    };
+
+    window.deleteBackup = function(filename) {
+        if(confirm('Delete backup ' + filename + '?')) {
+            socket.emit('delete_backup', filename);
+        }
+    };
+
+    socket.on('backup_deleted', (data) => {
+        showNotification(data.message, 'success');
+        socket.emit('list_backups');
+    });
+
+    window.restoreBackup = function(filename) {
+        const targetDb = prompt('Enter the name of the database to restore into:\n(Leave empty to try using the name inferred from backup, or restore to current)', currentDatabase || '');
+        if (targetDb !== null && targetDb.trim() !== '') {
+            socket.emit('restore_backup', { filename, targetDatabase: targetDb.trim() });
+            showNotification('Restoring backup, please wait...', 'info');
+        }
+    };
+
+    socket.on('backup_restored', (data) => {
+        showNotification(data.message, 'success');
+        loadTables();
+    });
+
+    document.getElementById('uploadBackupBtn').addEventListener('click', () => {
+        document.getElementById('uploadBackupInput').click();
+    });
+
+    document.getElementById('uploadBackupInput').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const formData = new FormData();
+        formData.append('backupFile', file);
+        showNotification('Uploading backup...', 'info');
+        try {
+            const res = await fetch('/api/upload-backup', { method: 'POST', body: formData });
+            const data = await res.json();
+            if (data.success) {
+                showNotification('Upload successful', 'success');
+                socket.emit('list_backups');
+            } else {
+                showNotification(data.error || 'Upload failed', 'error');
+            }
+        } catch(err) {
+            showNotification('Upload failed', 'error');
+        }
+    });
+
+    // 4. Import Database Modal
+    document.getElementById('importDatabaseBtn').addEventListener('click', () => {
+        document.getElementById('importDbName').textContent = currentDatabase;
+        showModal('importDatabaseModal');
+    });
+
+    document.getElementById('importDatabaseForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const fileInput = document.getElementById('importFile');
+        const file = fileInput.files[0];
+        if (!file) {
+            showNotification('Please select a file', 'error');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const content = e.target.result;
+            const type = file.name.endsWith('.json') ? 'json' : 'sql';
+            socket.emit('import_database', {
+                database: currentDatabase,
+                content: content,
+                type: type
+            });
+            showNotification('Importing database, please wait...', 'info');
+            closeModal('importDatabaseModal');
+        };
+        reader.readAsText(file);
+    });
+
+    socket.on('database_imported', (data) => {
+        showNotification(data.message, 'success');
+        loadTables(); 
+    });
+
+    // 5. Query History
+    document.getElementById('toggleQueryHistory').addEventListener('click', () => {
+        const panel = document.getElementById('queryHistoryPanel');
+        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    });
+
+    document.getElementById('clearQueryHistoryBtn').addEventListener('click', () => {
+        socket.emit('clear_query_history');
+    });
+
+    socket.on('query_history', (history) => {
+        const list = document.getElementById('queryHistoryList');
+        list.innerHTML = '';
+        history.forEach(h => {
+            const li = document.createElement('li');
+            li.className = 'query-history-item';
+            li.innerHTML = `
+                <div>
+                    <code>${h.query}</code>
+                    <small>${new Date(h.timestamp).toLocaleString()} - ${h.database}</small>
+                </div>
+                <button class="btn btn-small btn-secondary copy-query" data-query="${btoa(h.query)}">Copy</button>
+            `;
+            list.appendChild(li);
+        });
+
+        document.querySelectorAll('.copy-query').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const query = atob(e.target.dataset.query);
+                document.getElementById('sqlQuery').value = query;
+                document.getElementById('queryHistoryPanel').style.display = 'none';
+                showNotification('Query copied to editor', 'success');
+            });
+        });
+    });
+
+    document.getElementById('executeQuery').addEventListener('click', () => {
+        const query = sqlQuery.value.trim();
+        const db = queryDatabase.value;
+        if (query && db) {
+            socket.emit('save_query_history', { query, database: db });
+        }
+    });
+
+    // 6. DB and Table Sizes
+    socket.on('db_sizes', (sizes) => {
+        document.querySelectorAll('#databaseList li').forEach(li => {
+            const textNode = Array.from(li.childNodes).find(n => n.nodeType === 3);
+            const dbName = textNode ? textNode.nodeValue.trim() : li.textContent.trim();
+            const sizeObj = sizes.find(s => s.database === dbName);
+            if (sizeObj) {
+                let badge = li.querySelector('.size-badge');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'size-badge';
+                    li.appendChild(badge);
+                }
+                badge.textContent = `${sizeObj.sizeMb} MB`;
+            }
+        });
+    });
+    
+    socket.on('table_sizes', (data) => {
+        if (data.database === currentDatabase) {
+            document.querySelectorAll('#tableList li').forEach(li => {
+                const textNode = Array.from(li.childNodes).find(n => n.nodeType === 3);
+                const tblName = textNode ? textNode.nodeValue.trim() : li.textContent.trim();
+                const sizeObj = data.sizes.find(s => s.table === tblName);
+                if (sizeObj) {
+                    let badge = li.querySelector('.size-badge');
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'size-badge';
+                        li.appendChild(badge);
+                    }
+                    badge.textContent = `${sizeObj.sizeMb} MB`;
+                }
+            });
+        }
+    });
+
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+            if (mutation.target.id === 'databaseList' && mutation.addedNodes.length > 0) {
+                if (isConnected) socket.emit('get_db_sizes');
+            }
+            if (mutation.target.id === 'tableList' && mutation.addedNodes.length > 0) {
+                if (isConnected && currentDatabase) socket.emit('get_table_sizes', currentDatabase);
+            }
+        });
+    });
+    observer.observe(document.getElementById('databaseList'), { childList: true });
+    observer.observe(document.getElementById('tableList'), { childList: true });
+
+    // 7. Insert Row Logic
+    document.getElementById('insertRowBtn').addEventListener('click', () => {
+        if (!currentTableStructure) return;
+        document.getElementById('insertRowTableName').textContent = currentTable;
+        const container = document.getElementById('insertRowFields');
+        container.innerHTML = '';
+        currentTableStructure.forEach(field => {
+            const div = document.createElement('div');
+            div.className = 'form-group';
+            div.innerHTML = `
+                <label>${field.Field} (${field.Type}) ${field.Null === 'NO' ? '*' : ''}:</label>
+                <input type="text" name="${field.Field}" class="form-control" placeholder="${field.Default !== null ? 'Default: ' + field.Default : 'NULL'}">
+            `;
+            container.appendChild(div);
+        });
+        showModal('insertRowModal');
+    });
+
+    document.getElementById('insertRowForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const rowData = {};
+        for (let [key, value] of formData.entries()) {
+            if (value.trim() !== '') {
+                rowData[key] = value.trim();
+            }
+        }
+        socket.emit('insert_row', { database: currentDatabase, table: currentTable, rowData });
+        closeModal('insertRowModal');
+    });
+
+    socket.on('row_inserted', (data) => {
+        showNotification(data.message, 'success');
+        loadTableData();
+    });
+});
+

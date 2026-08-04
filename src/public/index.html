@@ -14,6 +14,19 @@
         <header>
              <h1>Database Manager</h1>
             <div class="header-controls">
+                <div class="system-stats" id="systemStats" style="display: none;">
+                    <div class="stat-item" title="CPU Usage">
+                        <span class="stat-label">CPU:</span>
+                        <div class="progress-bar"><div class="progress-fill cpu-fill" id="cpuBar"></div></div>
+                        <span class="stat-text" id="cpuText">0%</span>
+                    </div>
+                    <div class="stat-item" title="Memory Usage">
+                        <span class="stat-label">MEM:</span>
+                        <div class="progress-bar"><div class="progress-fill mem-fill" id="memBar"></div></div>
+                        <span class="stat-text" id="memText">0%</span>
+                    </div>
+                </div>
+                <button type="button" id="settingsBtn" class="btn btn-secondary icon-btn" title="Settings">⚙️</button>
                 <div class="connection-status" id="connectionStatus">
                     <span class="status-indicator disconnected"></span>
                     <span>Disconnected</span>
@@ -116,8 +129,8 @@
                     <div class="database-controls">
                         <button id="refreshDatabases" class="btn btn-small">Refresh</button>
                         <button id="createDatabase" class="btn btn-small btn-success">Create DB</button>
-                        <button id="exportDatabase" class="btn btn-small btn-primary" style="display: none;">Export
-                            DB</button>
+                        <button id="exportDatabase" class="btn btn-small btn-primary" style="display: none;">Export DB</button>
+                        <button id="importDatabaseBtn" class="btn btn-small btn-secondary" style="display: none;">Import DB</button>
                     </div>
                     <ul id="databaseList" class="database-list"></ul>
                 </div>
@@ -145,6 +158,7 @@
                     <div class="data-controls">
                         <span id="selectedTable">Select a table to view data</span>
                         <div class="data-actions">
+                            <button id="insertRowBtn" class="btn btn-success btn-small" style="display: none; margin-bottom: 5px;">+ Insert Row</button>
                             <div class="search-controls">
                                 <div class="search-header">
                                     <div class="search-tips-wrapper">
@@ -462,11 +476,23 @@
                         <textarea id="sqlQuery" placeholder="Enter your SQL query here..."></textarea>
 
                         <div class="query-result-section">
-                            <h4>Query Results</h4>
+                            <div class="query-history-header">
+                                <h4>Query Results</h4>
+                                <button id="toggleQueryHistory" class="btn btn-small btn-secondary">Query History</button>
+                            </div>
                             <div id="queryResults">
                                 <p>No query executed yet.</p>
                             </div>
                         </div>
+                    </div>
+                    
+                    <!-- Query History Panel -->
+                    <div class="query-history-panel" id="queryHistoryPanel" style="display: none;">
+                        <div class="query-history-header">
+                            <h4>Query History</h4>
+                            <button id="clearQueryHistoryBtn" class="btn btn-small btn-danger">Clear History</button>
+                        </div>
+                        <ul id="queryHistoryList" class="query-history-list"></ul>
                     </div>
                 </div>
             </div>
@@ -651,6 +677,138 @@
                 <div class="modal-buttons">
                     <button type="submit" class="btn btn-primary">Save Changes</button>
                     <button type="button" class="btn btn-secondary" onclick="closeModal('editRowModal')">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Import Database Modal -->
+    <div class="modal" id="importDatabaseModal">
+        <div class="modal-content">
+            <h3>Import Database</h3>
+            <form id="importDatabaseForm">
+                <div class="form-group">
+                    <label>Target Database: <strong id="importDbName"></strong></label>
+                </div>
+                <div class="form-group file-upload-area" id="importDropZone">
+                    <label for="importFile" class="file-label">
+                        <span class="upload-icon">📁</span>
+                        <span>Click or Drag & Drop .sql or .json file here</span>
+                    </label>
+                    <input type="file" id="importFile" accept=".sql,.json" required>
+                    <div id="importFileInfo" class="file-info" style="display:none;"></div>
+                </div>
+                <div class="modal-buttons">
+                    <button type="submit" class="btn btn-primary" id="startImportBtn">Start Import</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('importDatabaseModal')">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal" id="settingsModal">
+        <div class="modal-content modal-large">
+            <h3>Settings</h3>
+            <div class="settings-tabs">
+                <button class="settings-tab-btn active" data-tab="settingsGeneral">General</button>
+                <button class="settings-tab-btn" data-tab="settingsBackup">Auto Backup</button>
+            </div>
+            
+            <form id="settingsForm">
+                <!-- General Settings -->
+                <div class="settings-tab-content active" id="settingsGeneral">
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="settingShowSystemStats">
+                        <label for="settingShowSystemStats">Show System Stats (CPU/Memory) in Header</label>
+                    </div>
+                    <!-- Add more general settings here -->
+                </div>
+                
+                <!-- Auto Backup Settings -->
+                <div class="settings-tab-content" id="settingsBackup">
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="settingAutoBackupEnabled">
+                        <label for="settingAutoBackupEnabled">Enable Auto Backup</label>
+                    </div>
+                    <div id="autoBackupOptions" style="display: none; padding-left: 20px;">
+                        <div class="form-group">
+                            <label>Backup Interval:</label>
+                            <select id="settingAutoBackupInterval">
+                                <option value="hourly">Hourly</option>
+                                <option value="daily">Daily (Midnight)</option>
+                                <option value="weekly">Weekly (Sunday)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Keep last N backups:</label>
+                            <input type="number" id="settingAutoBackupRetention" min="1" max="50" value="5">
+                        </div>
+                        <div class="form-group">
+                            <label>Max CPU Limit (%) before skipping backup:</label>
+                            <input type="number" id="settingAutoBackupCpu" min="10" max="100" value="80">
+                        </div>
+                        <div class="form-group">
+                            <label>Target Database for Auto Backup:</label>
+                            <select id="settingAutoBackupDb">
+                                <option value="">Select Database</option>
+                            </select>
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="form-group">
+                        <button type="button" id="viewBackupHistoryBtn" class="btn btn-secondary">Manage Backup History</button>
+                    </div>
+                </div>
+                
+                <div class="modal-buttons">
+                    <button type="submit" class="btn btn-primary">Save Settings</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('settingsModal')">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Backup History Modal -->
+    <div class="modal" id="backupHistoryModal">
+        <div class="modal-content modal-large">
+            <div class="modal-header-with-actions">
+                <h3>Backup History</h3>
+                <div class="upload-backup-control">
+                    <input type="file" id="uploadBackupInput" accept=".sql,.json,.zip" style="display: none;">
+                    <button type="button" id="uploadBackupBtn" class="btn btn-primary btn-small">📤 Upload Backup</button>
+                </div>
+            </div>
+            <div class="table-container">
+                <table id="backupHistoryTable">
+                    <thead>
+                        <tr>
+                            <th>Filename</th>
+                            <th>Size</th>
+                            <th>Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="modal-buttons">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('backupHistoryModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Insert Row Modal -->
+    <div class="modal" id="insertRowModal">
+        <div class="modal-content">
+            <h3>Insert Row into <span id="insertRowTableName"></span></h3>
+            <form id="insertRowForm">
+                <div id="insertRowFields" class="edit-row-fields">
+                    <!-- Fields will be dynamically added here -->
+                </div>
+                <div class="modal-buttons">
+                    <button type="submit" class="btn btn-success">Insert</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('insertRowModal')">Cancel</button>
                 </div>
             </form>
         </div>
