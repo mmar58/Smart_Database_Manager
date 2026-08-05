@@ -1460,7 +1460,7 @@ function populateQueryDatabaseSelects(databases) {
 // ============================================================
 //  SYSTEM STATS
 // ============================================================
-let statsInterval = null;
+var statsInterval = null;
 
 function startStatsPolling() {
     if (statsInterval) return;
