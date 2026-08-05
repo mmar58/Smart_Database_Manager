@@ -5,6 +5,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
 const cors = require('cors');
+const crypto = require('crypto');
 const DatabaseManager = require('./database/DatabaseManager');
 const jwt = require('jsonwebtoken');
 const fs = require('fs/promises');
@@ -17,7 +18,7 @@ const app = express();
 
 // Create session middleware
 const sessionMiddleware = session({
-    secret: 'your_secret_key',
+    secret: process.env.SESSION_SECRET || 'db-manager-session-secret',
     resave: false,
     saveUninitialized: true
 });
@@ -25,24 +26,19 @@ const sessionMiddleware = session({
 app.use(sessionMiddleware);
 const server = http.createServer(app);
 const io = socketIo(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+    maxHttpBufferSize: 50e6 // 50MB for large imports
 });
 
-// Share session with Socket.IO
-io.use((socket, next) => {
-    sessionMiddleware(socket.request, {}, next);
-});
+io.use((socket, next) => { sessionMiddleware(socket.request, {}, next); });
 
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Increased limit for imports
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/backups', express.static(path.join(__dirname, '..', 'backups'))); // Serve backups for download
+app.use('/backups', express.static(path.join(__dirname, '..', 'backups')));
 
 // Store active database connections
 const activeConnections = new Map();
@@ -52,51 +48,158 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Setup multer for backup uploads
-const upload = multer({ dest: path.join(__dirname, '..', 'backups') });
+// --- File paths ---
+const DATA_DIR = path.join(__dirname, 'data');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const QUERY_HISTORY_FILE = path.join(DATA_DIR, 'query_history.json');
+const ANNOTATIONS_FILE = path.join(DATA_DIR, 'annotations.json');
+const CREDS_FILE = path.join(DATA_DIR, 'credentials.enc');
+const SALT_FILE = path.join(DATA_DIR, '.salt');
+const BACKUPS_DIR = path.join(__dirname, '..', 'backups');
+
+// Ensure directories exist
+[DATA_DIR, BACKUPS_DIR].forEach(dir => {
+    if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true });
+});
+
+// ============================================================
+//  AES-256-GCM CREDENTIAL ENCRYPTION SERVICE
+// ============================================================
+function getMachineKey() {
+    let salt;
+    if (fsSync.existsSync(SALT_FILE)) {
+        salt = fsSync.readFileSync(SALT_FILE, 'utf8').trim();
+    } else {
+        salt = crypto.randomBytes(32).toString('hex');
+        fsSync.writeFileSync(SALT_FILE, salt, 'utf8');
+    }
+    const seed = os.hostname() + 'db-manager-v2-' + (process.env.CRYPT_PEPPER || 'default-pepper');
+    return crypto.scryptSync(seed, salt, 32);
+}
+
+function encryptSecret(plaintext) {
+    const key = getMachineKey();
+    const iv = crypto.randomBytes(12); // 96-bit IV for GCM
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    // Format: iv(hex):tag(hex):ciphertext(hex)
+    return `${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+function decryptSecret(data) {
+    const parts = data.split(':');
+    if (parts.length !== 3) throw new Error('Invalid encrypted data format');
+    const key = getMachineKey();
+    const iv = Buffer.from(parts[0], 'hex');
+    const tag = Buffer.from(parts[1], 'hex');
+    const encrypted = Buffer.from(parts[2], 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return decipher.update(encrypted) + decipher.final('utf8');
+}
+
+async function loadCreds() {
+    if (!fsSync.existsSync(CREDS_FILE)) return {};
+    try { return JSON.parse(await fs.readFile(CREDS_FILE, 'utf8')); } catch { return {}; }
+}
+
+async function setSecureCredential(key, password) {
+    const creds = await loadCreds();
+    creds[key] = encryptSecret(password);
+    await fs.writeFile(CREDS_FILE, JSON.stringify(creds));
+}
+
+async function getSecureCredential(key) {
+    const creds = await loadCreds();
+    if (!creds[key]) return null;
+    try { return decryptSecret(creds[key]); } catch { return null; }
+}
+
+async function deleteSecureCredential(key) {
+    const creds = await loadCreds();
+    delete creds[key];
+    await fs.writeFile(CREDS_FILE, JSON.stringify(creds));
+}
+
+// Credential REST endpoints
+app.post('/api/credential/set', async (req, res) => {
+    const { key, password } = req.body;
+    if (!key || !password) return res.status(400).json({ error: 'Missing key or password' });
+    try {
+        await setSecureCredential(key, password);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/credential/get', async (req, res) => {
+    const { key } = req.query;
+    if (!key) return res.status(400).json({ error: 'Missing key' });
+    try {
+        const password = await getSecureCredential(key);
+        res.json({ password });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/credential/delete', async (req, res) => {
+    const { key } = req.query;
+    if (!key) return res.status(400).json({ error: 'Missing key' });
+    try {
+        await deleteSecureCredential(key);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Multer for backup uploads
+const upload = multer({ dest: BACKUPS_DIR });
 
 // System Stats API
+let _prevCpuTimes = null;
 app.get('/api/system-stats', (req, res) => {
     const cpus = os.cpus();
-    let totalIdle = 0;
-    let totalTick = 0;
-    
+    let idle = 0, total = 0;
     cpus.forEach(cpu => {
-        for (let type in cpu.times) {
-            totalTick += cpu.times[type];
-        }
-        totalIdle += cpu.times.idle;
+        for (const t in cpu.times) total += cpu.times[t];
+        idle += cpu.times.idle;
     });
-    
-    const idle = totalIdle / cpus.length;
-    const total = totalTick / cpus.length;
-    
-    // CPU usage estimation
-    const usage = 100 - ~~(100 * idle / total);
-    
+    idle /= cpus.length;
+    total /= cpus.length;
+
+    let cpuUsage = 0;
+    if (_prevCpuTimes) {
+        const idleDiff = idle - _prevCpuTimes.idle;
+        const totalDiff = total - _prevCpuTimes.total;
+        cpuUsage = totalDiff > 0 ? Math.round(100 * (1 - idleDiff / totalDiff)) : 0;
+    }
+    _prevCpuTimes = { idle, total };
+
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
-    const memUsage = (usedMem / totalMem) * 100;
 
     res.json({
-        cpuUsage: usage,
-        memUsage: memUsage.toFixed(2),
+        cpuUsage: Math.max(0, Math.min(100, cpuUsage)),
+        memUsage: ((usedMem / totalMem) * 100).toFixed(1),
         totalMem: (totalMem / 1024 / 1024 / 1024).toFixed(2) + ' GB',
-        usedMem: (usedMem / 1024 / 1024 / 1024).toFixed(2) + ' GB'
+        usedMem: (usedMem / 1024 / 1024 / 1024).toFixed(2) + ' GB',
+        cpuModel: cpus[0]?.model || 'Unknown',
+        cpuCount: cpus.length,
+        platform: os.platform(),
+        uptime: Math.floor(os.uptime())
     });
 });
 
 // Upload Backup Endpoint
 app.post('/api/upload-backup', upload.single('backupFile'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-    }
-    
-    // Rename to keep original name if possible
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const originalName = req.file.originalname;
-    const newPath = path.join(__dirname, '..', 'backups', originalName);
-    
+    const newPath = path.join(BACKUPS_DIR, originalName);
     try {
         await fs.rename(req.file.path, newPath);
         res.json({ success: true, message: 'Backup uploaded successfully', filename: originalName });
@@ -105,714 +208,574 @@ app.post('/api/upload-backup', upload.single('backupFile'), async (req, res) => 
     }
 });
 
-// Settings Management
-const SETTINGS_FILE = path.join(__dirname, 'data', 'settings.json');
-const QUERY_HISTORY_FILE = path.join(__dirname, 'data', 'query_history.json');
-
-// Ensure data dirs exist
-if (!fsSync.existsSync(path.join(__dirname, 'data'))) {
-    fsSync.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
-}
-if (!fsSync.existsSync(path.join(__dirname, '..', 'backups'))) {
-    fsSync.mkdirSync(path.join(__dirname, '..', 'backups'), { recursive: true });
-}
-
-// API to get last credentials from session
-// API to get last credentials from session (now via JWT)
+// JWT
 const JWT_SECRET = process.env.JWT_SECRET_KEY || 'your_fallback_secret_key_change_in_production';
 
-// API to get last credentials from session (now via JWT)
 app.get('/session-credentials', (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-        return res.json({});
-    }
-
-    const token = authHeader.split(' ')[1];
-    if (!token) {
-        return res.json({});
-    }
-
+    const token = (req.headers.authorization || '').split(' ')[1];
+    if (!token) return res.json({});
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        res.json({
-            host: decoded.host,
-            port: decoded.port,
-            username: decoded.username,
-            password: decoded.password,
-            database: decoded.database,
-            ssl: decoded.ssl,
-            engine: decoded.engine
-        });
-    } catch (err) {
-        // Invalid or expired token
-        res.json({});
-    }
+        const d = jwt.verify(token, JWT_SECRET);
+        res.json({ host: d.host, port: d.port, username: d.username, database: d.database, ssl: d.ssl, engine: d.engine });
+    } catch { res.json({}); }
 });
 
-// API to store credentials in session (now generate JWT)
 app.post('/store-credentials', (req, res) => {
-    const { host, port, username, password, database, ssl, engine } = req.body;
-
-    // Create payload
-    const payload = {
-        host,
-        port,
-        username,
-        password,
-        database,
-        ssl,
-        engine
-    };
-
-    // Sign token
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
-
+    const { host, port, username, database, ssl, engine } = req.body;
+    // Note: password is NOT stored in JWT – it's in encrypted credentials store
+    const token = jwt.sign({ host, port, username, database, ssl, engine }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token });
 });
 
-// Socket.IO connection handling
+// ============================================================
+//  SOCKET.IO HANDLERS
+// ============================================================
 io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
+    console.log('Client connected:', socket.id);
 
-    // Handle database connection
     socket.on('connect_database', async (credentials) => {
         try {
             const dbManager = new DatabaseManager(credentials);
             await dbManager.connect();
-
             activeConnections.set(socket.id, dbManager);
-
-            socket.emit('connection_success', {
-                message: 'Successfully connected to database',
-                connectionId: socket.id
-            });
-
-            console.log(`Database connected for user: ${socket.id}`);
+            socket.emit('connection_success', { message: 'Connected to database', connectionId: socket.id });
         } catch (error) {
-            socket.emit('connection_error', {
-                message: 'Failed to connect to database',
-                error: error.message
-            });
-            console.error('Database connection error:', error.message);
+            socket.emit('connection_error', { message: 'Failed to connect', error: error.message });
         }
     });
 
-    // Handle database disconnection
     socket.on('disconnect_database', async () => {
         const dbManager = activeConnections.get(socket.id);
         if (dbManager) {
             await dbManager.disconnect();
             activeConnections.delete(socket.id);
-            socket.emit('disconnection_success', {
-                message: 'Database disconnected successfully'
-            });
+            socket.emit('disconnection_success', { message: 'Disconnected' });
         }
     });
 
-    // Get all databases
     socket.on('get_databases', async () => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const databases = await dbManager.getDatabases();
-            socket.emit('databases_list', databases);
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('databases_list', await db.getDatabases()); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Get tables from a specific database
     socket.on('get_tables', async (databaseName) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const tables = await dbManager.getTables(databaseName);
-            socket.emit('tables_list', { database: databaseName, tables });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('tables_list', { database: databaseName, tables: await db.getTables(databaseName) }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Get table structure
     socket.on('get_table_structure', async ({ database, table }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const structure = await dbManager.getTableStructure(database, table);
-            socket.emit('table_structure', { database, table, structure });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('table_structure', { database, table, structure: await db.getTableStructure(database, table) }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Get table data
     socket.on('get_table_data', async ({ database, table, limit = 100, offset = 0, sortColumn = null, sortDirection = 'ASC', searchFilters = null, searchLogic = 'AND' }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
         try {
-            const result = await dbManager.getTableData(database, table, limit, offset, sortColumn, sortDirection, searchFilters, searchLogic);
-            // Send the result directly, adding database and table info
-            socket.emit('table_data', {
-                database,
-                table,
-                data: result.data,
-                total: result.total,
-                limit: result.limit,
-                offset: result.offset,
-                sortColumn: result.sortColumn,
-                sortDirection: result.sortDirection,
-                searchFilters: result.searchFilters,
-                searchLogic: result.searchLogic
-            });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+            const result = await db.getTableData(database, table, limit, offset, sortColumn, sortDirection, searchFilters, searchLogic);
+            socket.emit('table_data', { database, table, ...result });
+        } catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Execute custom SQL query
     socket.on('execute_query', async ({ database, query }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const result = await dbManager.executeQuery(database, query);
-            socket.emit('query_result', { query, result });
-        } catch (error) {
-            // Emitting specific query error for logging
-            socket.emit('query_execution_error', {
-                message: error.message,
-                query: query,
-                database: database
-            });
-            // Also emit standard error for notification if needed, or we might just use the log
-            // Keeping standard error for now as it triggers a notification, but we might want to suppress it if the log is enough
-            // decided to keep both: immediate notification + persistent log
-            socket.emit('error', { message: error.message });
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('query_result', { query, result: await db.executeQuery(database, query) }); }
+        catch (e) {
+            socket.emit('query_execution_error', { message: e.message, query, database });
+            socket.emit('error', { message: e.message });
         }
     });
 
-    // Create new database
     socket.on('create_database', async (databaseName) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.createDatabase(databaseName);
-            socket.emit('database_created', { message: `Database '${databaseName}' created successfully` });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.createDatabase(databaseName); socket.emit('database_created', { message: `Database '${databaseName}' created` }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Drop database
     socket.on('drop_database', async (databaseName) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.dropDatabase(databaseName);
-            socket.emit('database_dropped', { message: `Database '${databaseName}' dropped successfully` });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.dropDatabase(databaseName); socket.emit('database_dropped', { message: `Database '${databaseName}' dropped` }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Alter table
     socket.on('alter_table', async ({ database, table, alterQuery }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.alterTable(database, table, alterQuery);
-            socket.emit('table_altered', { message: `Table '${table}' altered successfully` });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.alterTable(database, table, alterQuery); socket.emit('table_altered', { message: `Table '${table}' altered` }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Get table indexes
     socket.on('get_table_indexes', async ({ database, table }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const indexes = await dbManager.getTableIndexes(database, table);
-            socket.emit('table_indexes', { database, table, indexes });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('table_indexes', { database, table, indexes: await db.getTableIndexes(database, table) }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Get table constraints
     socket.on('get_table_constraints', async ({ database, table }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const constraints = await dbManager.getTableConstraints(database, table);
-            socket.emit('table_constraints', { database, table, constraints });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('table_constraints', { database, table, constraints: await db.getTableConstraints(database, table) }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Drop table
     socket.on('drop_table', async ({ database, table }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.dropTable(database, table);
-            socket.emit('table_dropped', { message: `Table '${table}' dropped successfully` });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.dropTable(database, table); socket.emit('table_dropped', { message: `Table '${table}' dropped` }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Export database
     socket.on('export_database', async ({ database, options = {} }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const exportResult = await dbManager.exportDatabase(database, options);
-            socket.emit('database_exported', exportResult);
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('database_exported', await db.exportDatabase(database, options)); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Export table
     socket.on('export_table', async ({ database, table, options = {} }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
         try {
-            const tableContent = await dbManager.exportTable(database, table, options);
+            const content = await db.exportTable(database, table, options);
             const ext = options.format === 'json' ? 'json' : 'sql';
-            const exportResult = {
+            socket.emit('table_exported', {
                 filename: `${table}_export_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.${ext}`,
-                content: tableContent,
-                size: Buffer.byteLength(tableContent, 'utf8')
-            };
-            socket.emit('table_exported', exportResult);
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+                content,
+                size: Buffer.byteLength(content, 'utf8')
+            });
+        } catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Get row count for export preview
     socket.on('get_row_count', async ({ database, table, whereClause = null }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            const count = await dbManager.getRowCount(database, table, whereClause);
-            socket.emit('row_count_result', { database, table, count, whereClause });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { socket.emit('row_count_result', { database, table, count: await db.getRowCount(database, table, whereClause), whereClause }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Delete all data
     socket.on('delete_all_data', async ({ database, table }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.deleteAllData(database, table);
-            socket.emit('data_deleted', { message: `All data deleted from table '${table}'` });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.deleteAllData(database, table); socket.emit('data_deleted', { message: `All data deleted from '${table}'` }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Update row
     socket.on('update_row', async ({ database, table, primaryKeyColumn, primaryKeyValue, updateData }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.updateRow(database, table, primaryKeyColumn, primaryKeyValue, updateData);
-            socket.emit('row_updated', { message: 'Row updated successfully' });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.updateRow(database, table, primaryKeyColumn, primaryKeyValue, updateData); socket.emit('row_updated', { message: 'Row updated' }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Delete selected data
     socket.on('delete_selected_data', async ({ database, table, targetColumn, targetValues }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.deleteRows(database, table, targetColumn, targetValues);
-            socket.emit('data_deleted', { message: `${targetValues.length} rows deleted from table '${table}'` });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.deleteRows(database, table, targetColumn, targetValues); socket.emit('data_deleted', { message: `${targetValues.length} rows deleted` }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Import database
     socket.on('import_database', async ({ database, content, type }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
         try {
-            if (type === 'json') {
-                await dbManager.importDatabaseFromJson(database, content);
-            } else {
-                await dbManager.importDatabase(database, content);
-            }
-            socket.emit('database_imported', { message: 'Database imported successfully' });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+            if (type === 'json') await db.importDatabaseFromJson(database, content);
+            else await db.importDatabase(database, content);
+            socket.emit('database_imported', { message: 'Import completed successfully' });
+        } catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Insert row
     socket.on('insert_row', async ({ database, table, rowData }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
-        try {
-            await dbManager.insertRow(database, table, rowData);
-            socket.emit('row_inserted', { message: 'Row inserted successfully' });
-        } catch (error) {
-            socket.emit('error', { message: error.message });
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try { await db.insertRow(database, table, rowData); socket.emit('row_inserted', { message: 'Row inserted successfully' }); }
+        catch (e) { socket.emit('error', { message: e.message }); }
     });
 
-    // Get DB sizes
     socket.on('get_db_sizes', async () => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) return;
-        try {
-            const sizes = await dbManager.getDatabaseSizes();
-            socket.emit('db_sizes', sizes);
-        } catch (err) {
-            console.error(err);
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return;
+        try { socket.emit('db_sizes', await db.getDatabaseSizes()); } catch {}
     });
 
-    // Get Table sizes
     socket.on('get_table_sizes', async (database) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) return;
-        try {
-            const sizes = await dbManager.getTableSizes(database);
-            socket.emit('table_sizes', { database, sizes });
-        } catch (err) {
-            console.error(err);
-        }
+        const db = activeConnections.get(socket.id);
+        if (!db) return;
+        try { socket.emit('table_sizes', { database, sizes: await db.getTableSizes(database) }); } catch {}
     });
 
-    // Backup Settings
+    // ---- ER Diagram / FK data ----
+    socket.on('get_foreign_keys', async (database) => {
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try {
+            let fkData = [];
+            if (db.engine === 'postgresql') {
+                const client = await db._pgGetClient(database);
+                try {
+                    const result = await client.query(`
+                        SELECT
+                            tc.table_name AS from_table,
+                            kcu.column_name AS from_column,
+                            ccu.table_name AS to_table,
+                            ccu.column_name AS to_column,
+                            tc.constraint_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                            ON tc.constraint_name = kcu.constraint_name
+                        JOIN information_schema.constraint_column_usage ccu
+                            ON tc.constraint_name = ccu.constraint_name
+                        WHERE tc.constraint_type = 'FOREIGN KEY'
+                    `);
+                    fkData = result.rows;
+                } finally { await client.end(); }
+            } else {
+                const [rows] = await db.connection.query(`
+                    SELECT
+                        TABLE_NAME AS from_table,
+                        COLUMN_NAME AS from_column,
+                        REFERENCED_TABLE_NAME AS to_table,
+                        REFERENCED_COLUMN_NAME AS to_column,
+                        CONSTRAINT_NAME AS constraint_name
+                    FROM information_schema.KEY_COLUMN_USAGE
+                    WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL
+                `, [database]);
+                fkData = rows;
+            }
+            socket.emit('foreign_keys', { database, fkData });
+        } catch (e) { socket.emit('error', { message: e.message }); }
+    });
+
+    // ---- Schema Diff ----
+    socket.on('diff_databases', async ({ database1, database2 }) => {
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try {
+            const [tables1, tables2] = await Promise.all([db.getTables(database1), db.getTables(database2)]);
+            const set1 = new Set(tables1);
+            const set2 = new Set(tables2);
+            const added = tables2.filter(t => !set1.has(t));
+            const removed = tables1.filter(t => !set2.has(t));
+            const common = tables1.filter(t => set2.has(t));
+            const modified = [];
+            for (const table of common) {
+                const [s1, s2] = await Promise.all([db.getTableStructure(database1, table), db.getTableStructure(database2, table)]);
+                const fields1 = new Map(s1.map(f => [f.Field, f]));
+                const fields2 = new Map(s2.map(f => [f.Field, f]));
+                const changes = [];
+                for (const [name, f] of fields1) {
+                    if (!fields2.has(name)) changes.push({ type: 'removed_column', column: name });
+                    else {
+                        const f2 = fields2.get(name);
+                        if (f.Type !== f2.Type || f.Null !== f2.Null || f.Default !== f2.Default)
+                            changes.push({ type: 'modified_column', column: name, from: f, to: f2 });
+                    }
+                }
+                for (const [name] of fields2) {
+                    if (!fields1.has(name)) changes.push({ type: 'added_column', column: name });
+                }
+                if (changes.length > 0) modified.push({ table, changes });
+            }
+            socket.emit('schema_diff', { database1, database2, added, removed, modified });
+        } catch (e) { socket.emit('error', { message: e.message }); }
+    });
+
+    // ---- Slow Query Monitor ----
+    socket.on('get_slow_queries', async ({ database, limit = 20 }) => {
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
+        try {
+            let queries = [];
+            if (db.engine === 'postgresql') {
+                // Requires pg_stat_statements extension
+                try {
+                    const client = await db._pgGetClient(database);
+                    try {
+                        const result = await client.query(`
+                            SELECT query, calls, total_exec_time, mean_exec_time, rows
+                            FROM pg_stat_statements
+                            ORDER BY mean_exec_time DESC
+                            LIMIT $1
+                        `, [limit]);
+                        queries = result.rows.map(r => ({
+                            query: r.query,
+                            execCount: r.calls,
+                            totalMs: parseFloat(r.total_exec_time).toFixed(2),
+                            avgMs: parseFloat(r.mean_exec_time).toFixed(2),
+                            rows: r.rows
+                        }));
+                    } finally { await client.end(); }
+                } catch (pgErr) {
+                    socket.emit('slow_queries', { queries: [], warning: 'pg_stat_statements extension not enabled. Run: CREATE EXTENSION pg_stat_statements;' });
+                    return;
+                }
+            } else {
+                // MySQL performance_schema
+                try {
+                    const [rows] = await db.connection.query(`
+                        SELECT DIGEST_TEXT AS query, COUNT_STAR AS exec_count,
+                               SUM_TIMER_WAIT/1000000000 AS total_ms,
+                               AVG_TIMER_WAIT/1000000000 AS avg_ms,
+                               SUM_ROWS_EXAMINED AS rows_examined
+                        FROM performance_schema.events_statements_summary_by_digest
+                        WHERE SCHEMA_NAME = ?
+                        ORDER BY avg_ms DESC
+                        LIMIT ?
+                    `, [database, limit]);
+                    queries = rows.map(r => ({
+                        query: r.query,
+                        execCount: r.exec_count,
+                        totalMs: parseFloat(r.total_ms).toFixed(2),
+                        avgMs: parseFloat(r.avg_ms).toFixed(2),
+                        rows: r.rows_examined
+                    }));
+                } catch (perfErr) {
+                    socket.emit('slow_queries', { queries: [], warning: 'performance_schema not available. Enable it in MySQL config with performance_schema=ON' });
+                    return;
+                }
+            }
+            socket.emit('slow_queries', { queries });
+        } catch (e) { socket.emit('error', { message: e.message }); }
+    });
+
+    // ---- Annotations ----
+    socket.on('get_annotations', async () => {
+        try {
+            if (fsSync.existsSync(ANNOTATIONS_FILE)) {
+                socket.emit('annotations', JSON.parse(await fs.readFile(ANNOTATIONS_FILE, 'utf8')));
+            } else {
+                socket.emit('annotations', {});
+            }
+        } catch {}
+    });
+
+    socket.on('save_annotation', async ({ key, note }) => {
+        try {
+            let data = {};
+            if (fsSync.existsSync(ANNOTATIONS_FILE)) data = JSON.parse(await fs.readFile(ANNOTATIONS_FILE, 'utf8'));
+            data[key] = { note, updatedAt: new Date().toISOString() };
+            await fs.writeFile(ANNOTATIONS_FILE, JSON.stringify(data, null, 2));
+            socket.emit('annotations', data);
+        } catch (e) { socket.emit('error', { message: 'Failed to save annotation' }); }
+    });
+
+    socket.on('delete_annotation', async ({ key }) => {
+        try {
+            let data = {};
+            if (fsSync.existsSync(ANNOTATIONS_FILE)) data = JSON.parse(await fs.readFile(ANNOTATIONS_FILE, 'utf8'));
+            delete data[key];
+            await fs.writeFile(ANNOTATIONS_FILE, JSON.stringify(data, null, 2));
+            socket.emit('annotations', data);
+        } catch {}
+    });
+
+    // ---- Settings ----
     socket.on('get_settings', async () => {
         try {
             let settings = {};
-            if (fsSync.existsSync(SETTINGS_FILE)) {
-                settings = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
-            }
+            if (fsSync.existsSync(SETTINGS_FILE)) settings = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
             socket.emit('settings', settings);
-        } catch (err) {
-            console.error(err);
-        }
+        } catch {}
     });
 
     socket.on('save_settings', async (settings) => {
         try {
             await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
             socket.emit('settings_saved', { message: 'Settings saved' });
-            // Restart cron if auto backup changed
             setupAutoBackup();
-        } catch (err) {
-            socket.emit('error', { message: 'Failed to save settings' });
-        }
+        } catch { socket.emit('error', { message: 'Failed to save settings' }); }
     });
 
-    // Backup Management
+    // ---- Backup Management ----
     socket.on('list_backups', async () => {
         try {
-            const backupsDir = path.join(__dirname, '..', 'backups');
-            if (!fsSync.existsSync(backupsDir)) {
-                socket.emit('backups_list', []);
-                return;
-            }
-            const files = await fs.readdir(backupsDir);
+            if (!fsSync.existsSync(BACKUPS_DIR)) { socket.emit('backups_list', []); return; }
+            const files = await fs.readdir(BACKUPS_DIR);
             const backups = [];
             for (const file of files) {
-                const stat = await fs.stat(path.join(backupsDir, file));
+                const stat = await fs.stat(path.join(BACKUPS_DIR, file));
                 if (stat.isFile()) {
-                    backups.push({
-                        name: file,
-                        size: stat.size,
-                        date: stat.mtime
-                    });
+                    // Parse metadata from filename: dbname_profilename_autobackup_timestamp.sql
+                    const parts = file.split('_autobackup_');
+                    const meta = parts.length > 1 ? parts[0] : null;
+                    backups.push({ name: file, size: stat.size, date: stat.mtime, meta });
                 }
             }
             backups.sort((a, b) => b.date - a.date);
             socket.emit('backups_list', backups);
-        } catch (err) {
-            socket.emit('error', { message: 'Failed to list backups' });
-        }
+        } catch { socket.emit('error', { message: 'Failed to list backups' }); }
     });
 
     socket.on('delete_backup', async (filename) => {
         try {
-            await fs.unlink(path.join(__dirname, '..', 'backups', filename));
+            await fs.unlink(path.join(BACKUPS_DIR, filename));
             socket.emit('backup_deleted', { message: `Deleted ${filename}` });
-        } catch (err) {
-            socket.emit('error', { message: 'Failed to delete backup' });
-        }
+        } catch { socket.emit('error', { message: 'Failed to delete backup' }); }
     });
-    
+
     socket.on('restore_backup', async ({ filename, targetDatabase }) => {
-        const dbManager = activeConnections.get(socket.id);
-        if (!dbManager) {
-            socket.emit('error', { message: 'No active database connection' });
-            return;
-        }
-
+        const db = activeConnections.get(socket.id);
+        if (!db) return socket.emit('error', { message: 'No active connection' });
         try {
-            const filePath = path.join(__dirname, '..', 'backups', filename);
-            const content = await fs.readFile(filePath, 'utf8');
-            if (filename.endsWith('.json')) {
-                await dbManager.importDatabaseFromJson(targetDatabase, content);
-            } else if (filename.endsWith('.sql')) {
-                await dbManager.importDatabase(targetDatabase, content);
-            } else {
-                throw new Error('Unsupported backup format for direct restore');
-            }
+            const content = await fs.readFile(path.join(BACKUPS_DIR, filename), 'utf8');
+            if (filename.endsWith('.json')) await db.importDatabaseFromJson(targetDatabase, content);
+            else await db.importDatabase(targetDatabase, content);
             socket.emit('backup_restored', { message: `Restored ${filename} to ${targetDatabase}` });
-        } catch (error) {
-            socket.emit('error', { message: `Failed to restore backup: ${error.message}` });
-        }
+        } catch (e) { socket.emit('error', { message: `Restore failed: ${e.message}` }); }
     });
 
-    // Query History
+    // ---- Query History ----
     socket.on('get_query_history', async () => {
         try {
-            if (fsSync.existsSync(QUERY_HISTORY_FILE)) {
-                const history = JSON.parse(await fs.readFile(QUERY_HISTORY_FILE, 'utf8'));
-                socket.emit('query_history', history);
-            } else {
-                socket.emit('query_history', []);
-            }
-        } catch (err) {
-            console.error(err);
-        }
+            if (fsSync.existsSync(QUERY_HISTORY_FILE)) socket.emit('query_history', JSON.parse(await fs.readFile(QUERY_HISTORY_FILE, 'utf8')));
+            else socket.emit('query_history', []);
+        } catch {}
     });
 
     socket.on('save_query_history', async (queryObj) => {
         try {
-            let history = [];
-            if (fsSync.existsSync(QUERY_HISTORY_FILE)) {
-                history = JSON.parse(await fs.readFile(QUERY_HISTORY_FILE, 'utf8'));
-            }
-            history.unshift({
-                ...queryObj,
-                timestamp: new Date().toISOString()
-            });
-            if (history.length > 200) history = history.slice(0, 200); // keep max 200
+            let history = fsSync.existsSync(QUERY_HISTORY_FILE) ? JSON.parse(await fs.readFile(QUERY_HISTORY_FILE, 'utf8')) : [];
+            history.unshift({ ...queryObj, timestamp: new Date().toISOString() });
+            if (history.length > 200) history = history.slice(0, 200);
             await fs.writeFile(QUERY_HISTORY_FILE, JSON.stringify(history, null, 2));
             socket.emit('query_history', history);
-        } catch (err) {
-            console.error(err);
-        }
+        } catch {}
     });
-    
+
     socket.on('clear_query_history', async () => {
-        try {
-            await fs.writeFile(QUERY_HISTORY_FILE, JSON.stringify([]));
-            socket.emit('query_history', []);
-        } catch (err) {
-            console.error(err);
-        }
+        try { await fs.writeFile(QUERY_HISTORY_FILE, '[]'); socket.emit('query_history', []); } catch {}
     });
 
-    // Handle client disconnect
     socket.on('disconnect', async () => {
-        console.log('User disconnected:', socket.id);
-        const dbManager = activeConnections.get(socket.id);
-        if (dbManager) {
-            await dbManager.disconnect();
-            activeConnections.delete(socket.id);
-        }
+        const db = activeConnections.get(socket.id);
+        if (db) { await db.disconnect(); activeConnections.delete(socket.id); }
+        console.log('Client disconnected:', socket.id);
     });
 });
 
-// Logout route
+// Logout
 app.post('/logout', (req, res) => {
-    req.session.destroy(err => {
-        if (err) {
-            return res.status(500).json({ success: false, message: 'Logout failed' });
-        }
-        res.json({ success: true });
-    });
+    req.session.destroy(() => res.json({ success: true }));
 });
 
-let currentCronJob = null;
+// ============================================================
+//  AUTO BACKUP SCHEDULER — MULTI-PROFILE
+// ============================================================
+const activeCronJobs = new Map(); // profileId → cron job
 
-function setupAutoBackup() {
-    if (currentCronJob) {
-        currentCronJob.stop();
-        currentCronJob = null;
+function getCpuUsage() {
+    const cpus = os.cpus();
+    let idle = 0, total = 0;
+    cpus.forEach(cpu => {
+        for (const t in cpu.times) total += cpu.times[t];
+        idle += cpu.times.idle;
+    });
+    return Math.max(0, 100 - ~~(100 * (idle / cpus.length) / (total / cpus.length)));
+}
+
+async function runProfileBackup(profile) {
+    const cpuUsage = getCpuUsage();
+    const cpuLimit = profile.cpuLimit || 80;
+    if (cpuUsage > cpuLimit) {
+        console.warn(`[Backup] Profile "${profile.name}" skipped: CPU ${cpuUsage}% > limit ${cpuLimit}%`);
+        return;
     }
 
-    let settings = {};
-    if (fsSync.existsSync(SETTINGS_FILE)) {
-        try {
-            settings = JSON.parse(fsSync.readFileSync(SETTINGS_FILE, 'utf8'));
-        } catch (e) {}
+    const credentials = { ...profile.credentials };
+    // Decrypt password if stored
+    if (profile.credentialKey) {
+        const pwd = await getSecureCredential(profile.credentialKey);
+        if (pwd) credentials.password = pwd;
     }
 
-    if (settings.autoBackup && settings.autoBackup.enabled) {
-        let cronExpr = '0 0 * * *'; // Daily at midnight default
-        if (settings.autoBackup.interval === 'hourly') cronExpr = '0 * * * *';
-        else if (settings.autoBackup.interval === 'weekly') cronExpr = '0 0 * * 0';
-        else if (settings.autoBackup.cronExpression) cronExpr = settings.autoBackup.cronExpression;
+    const databases = profile.databases || [];
+    if (databases.length === 0) {
+        console.warn(`[Backup] Profile "${profile.name}" has no databases configured`);
+        return;
+    }
 
-        currentCronJob = cron.schedule(cronExpr, async () => {
-            console.log('Running scheduled auto backup...');
-            
-            // Check CPU usage limit
-            const cpus = os.cpus();
-            let totalIdle = 0;
-            let totalTick = 0;
-            cpus.forEach(cpu => {
-                for (let type in cpu.times) totalTick += cpu.times[type];
-                totalIdle += cpu.times.idle;
-            });
-            const usage = 100 - ~~(100 * (totalIdle / cpus.length) / (totalTick / cpus.length));
-            const limit = settings.autoBackup.cpuLimit || 80;
-            
-            if (usage > limit) {
-                console.warn(`Auto backup skipped: CPU usage ${usage}% > limit ${limit}%`);
-                return;
-            }
+    let dbManager;
+    try {
+        dbManager = new DatabaseManager(credentials);
+        await dbManager.connect();
 
+        for (const dbName of databases) {
             try {
-                // Determine which connection to use (or instantiate a new one based on saved credentials if available)
-                const credentials = settings.autoBackup.credentials;
-                if (!credentials) {
-                    console.error('Auto backup failed: No credentials saved in settings');
-                    return;
-                }
-
-                const dbManager = new DatabaseManager(credentials);
-                await dbManager.connect();
-                
-                const dbName = credentials.database;
-                if (!dbName) {
-                    console.error('Auto backup failed: No target database specified in credentials');
-                    await dbManager.disconnect();
-                    return;
-                }
-                
                 const result = await dbManager.exportDatabase(dbName, { exportMethod: 'single', format: 'sql', includeData: true });
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                const filename = `${dbName}_autobackup_${timestamp}.sql`;
-                const filePath = path.join(__dirname, '..', 'backups', filename);
-                
-                await fs.writeFile(filePath, result.content);
-                console.log(`Auto backup completed: ${filename}`);
-                
-                // Keep only N recent backups
-                const retention = settings.autoBackup.retention || 5;
-                const backupsDir = path.join(__dirname, '..', 'backups');
-                const files = await fs.readdir(backupsDir);
-                const backups = [];
-                for (const file of files) {
-                    if (file.includes('_autobackup_')) {
-                        const stat = await fs.stat(path.join(backupsDir, file));
-                        backups.push({ name: file, date: stat.mtimeMs });
+                // Sanitize profile name for filename
+                const safeProfile = (profile.name || 'default').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+                const filename = `${dbName}__${safeProfile}__autobackup__${timestamp}.sql`;
+                await fs.writeFile(path.join(BACKUPS_DIR, filename), result.content);
+                console.log(`[Backup] ✓ ${filename}`);
+
+                // Retention: keep only N backups per db+profile combination
+                const retention = profile.retention || 5;
+                const prefix = `${dbName}__${safeProfile}__autobackup__`;
+                const all = await fs.readdir(BACKUPS_DIR);
+                const mine = [];
+                for (const f of all) {
+                    if (f.startsWith(prefix)) {
+                        const stat = await fs.stat(path.join(BACKUPS_DIR, f));
+                        mine.push({ name: f, date: stat.mtimeMs });
                     }
                 }
-                backups.sort((a, b) => b.date - a.date); // newest first
-                
-                if (backups.length > retention) {
-                    for (let i = retention; i < backups.length; i++) {
-                        await fs.unlink(path.join(backupsDir, backups[i].name));
-                        console.log(`Deleted old backup: ${backups[i].name}`);
-                    }
+                mine.sort((a, b) => b.date - a.date);
+                for (let i = retention; i < mine.length; i++) {
+                    await fs.unlink(path.join(BACKUPS_DIR, mine[i].name));
+                    console.log(`[Backup] Pruned old backup: ${mine[i].name}`);
                 }
-                
-                await dbManager.disconnect();
-            } catch (err) {
-                console.error('Auto backup error:', err.message);
+            } catch (dbErr) {
+                console.error(`[Backup] Failed for DB "${dbName}" in profile "${profile.name}":`, dbErr.message);
             }
-        });
+        }
+    } catch (connErr) {
+        console.error(`[Backup] Connection failed for profile "${profile.name}":`, connErr.message);
+    } finally {
+        if (dbManager) await dbManager.disconnect().catch(() => {});
     }
 }
 
-// Initial setup of auto backup
+function setupAutoBackup() {
+    // Stop all existing jobs
+    for (const job of activeCronJobs.values()) job.stop();
+    activeCronJobs.clear();
+
+    let settings = {};
+    if (fsSync.existsSync(SETTINGS_FILE)) {
+        try { settings = JSON.parse(fsSync.readFileSync(SETTINGS_FILE, 'utf8')); } catch {}
+    }
+
+    const profiles = settings.backupProfiles || [];
+    for (const profile of profiles) {
+        if (!profile.enabled) continue;
+
+        let cronExpr = '0 0 * * *'; // default: daily midnight
+        if (profile.interval === 'hourly') cronExpr = '0 * * * *';
+        else if (profile.interval === 'weekly') cronExpr = '0 0 * * 0';
+        else if (profile.interval === 'custom' && profile.cronExpression) cronExpr = profile.cronExpression;
+
+        try {
+            const job = cron.schedule(cronExpr, () => runProfileBackup(profile));
+            activeCronJobs.set(profile.id || profile.name, job);
+            console.log(`[Backup] Scheduled profile "${profile.name}" (${cronExpr})`);
+        } catch (e) {
+            console.error(`[Backup] Invalid cron for profile "${profile.name}":`, e.message);
+        }
+    }
+}
+
 setupAutoBackup();
 
-// Start server
 server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-    console.log(`Access the application at http://localhost:${PORT}`);
+    console.log(`\n⚡ DB Manager running at http://localhost:${PORT}\n`);
 });

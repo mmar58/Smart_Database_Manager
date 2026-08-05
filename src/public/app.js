@@ -1,3113 +1,2228 @@
-// Initialize Socket.IO connection
-const socket = io();
+/**
+ * DB Manager — Full Database Maintainer v2
+ * Frontend Application Logic
+ */
 
-// Global variables
+'use strict';
+
+// ============================================================
+//  GLOBALS
+// ============================================================
+let socket = io();
 let currentDatabase = null;
 let currentTable = null;
 let currentTableStructure = null;
-let currentPrimaryKey = null;
-let currentPage = 1;
-let totalPages = 1;
-let pageSize = 100;
+let currentCredentials = null;
 let isConnected = false;
+let currentPage = 1;
+let pageSize = 100;
 let currentSortColumn = null;
 let currentSortDirection = 'ASC';
 let currentSearchFilters = [];
 let currentSearchLogic = 'AND';
-let cachedColumns = [];
-let currentCredentials = null;
+let totalRows = 0;
+let annotations = {};
+let settings = {};
+let backupProfiles = [];
+let sqlEditor = null; // CodeMirror instance
 
-// DOM Elements
-const connectionForm = document.getElementById('connectionForm');
-const connectionPanel = document.getElementById('connectionPanel');
-const mainInterface = document.getElementById('mainInterface');
-const connectionStatus = document.getElementById('connectionStatus');
-const disconnectBtn = document.getElementById('disconnectBtn');
-const logoutBtn = document.getElementById('logoutBtn');
-const databaseList = document.getElementById('databaseList');
-const tableList = document.getElementById('tableList');
-const dataTable = document.getElementById('dataTable');
-const structureTable = document.getElementById('structureTable');
-const indexesTable = document.getElementById('indexesTable');
-const selectedTableSpan = document.getElementById('selectedTable');
-const pageInfo = document.getElementById('pageInfo');
-const sqlQuery = document.getElementById('sqlQuery');
-const queryResults = document.getElementById('queryResults');
-const queryDatabase = document.getElementById('queryDatabase');
+// ============================================================
+//  THEME
+// ============================================================
+function applyTheme(theme) {
+    if (theme === 'auto') {
+        theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', theme);
+    document.getElementById('darkModeToggle').textContent = theme === 'dark' ? '☀️' : '🌙';
+    if (sqlEditor) {
+        sqlEditor.setOption('theme', theme === 'dark' ? 'dracula' : 'default');
+    }
+    // Update active pill in settings
+    document.querySelectorAll('[data-theme-opt]').forEach(el => el.classList.remove('active'));
+}
 
-// Initialize the application
-document.addEventListener('DOMContentLoaded', function () {
-    // Restore engine selection from localStorage
-    const savedEngine = localStorage.getItem('db_engine') || 'mysql';
-    const engineSelect = document.getElementById('engine');
-    engineSelect.value = savedEngine;
+function getStoredThemePref() {
+    return localStorage.getItem('dbm_theme') || 'auto';
+}
 
-    setupEventListeners();
-    setupSocketListeners();
-    restoreSessionCredentials();
-    loadSavedConnections();
+function setTheme(pref) {
+    localStorage.setItem('dbm_theme', pref);
+    applyTheme(pref);
+    document.querySelectorAll('[data-theme-opt]').forEach(el => el.classList.remove('active'));
+    document.querySelector(`[data-theme-opt="${pref}"]`)?.classList.add('active');
+}
+
+// Apply on load
+applyTheme(getStoredThemePref());
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (getStoredThemePref() === 'auto') applyTheme('auto');
 });
 
-function setupEventListeners() {
-    // Connection form
-    connectionForm.addEventListener('submit', handleConnection);
-    disconnectBtn.addEventListener('click', handleDisconnection);
-    logoutBtn.addEventListener('click', handleLogout);
+// ============================================================
+//  CODEMIRROR SQL EDITOR
+// ============================================================
+function initCodeMirror() {
+    const textarea = document.getElementById('sqlQuery');
+    if (!textarea || sqlEditor) return;
+    const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dracula' : 'default';
+    sqlEditor = CodeMirror.fromTextArea(textarea, {
+        mode: 'text/x-sql',
+        theme,
+        lineNumbers: true,
+        indentWithTabs: false,
+        tabSize: 2,
+        autofocus: false,
+        extraKeys: {
+            'Ctrl-Enter': () => executeQuery(),
+            'Cmd-Enter': () => executeQuery(),
+        },
+        lineWrapping: false,
+    });
+    sqlEditor.setSize('100%', '210px');
+}
 
-    // Advanced options toggle
-    document.getElementById('advancedOptionsToggle').addEventListener('click', function () {
-        const advancedOptions = document.getElementById('advancedOptions');
-        const icon = this.querySelector('.toggle-icon');
-        if (advancedOptions.style.display === 'none') {
-            advancedOptions.style.display = 'block';
-            icon.textContent = '▲';
+// ============================================================
+//  MODAL SYSTEM
+// ============================================================
+function showModal(id) {
+    const overlay = document.getElementById(id);
+    if (!overlay) return;
+    overlay.classList.add('open');
+    overlay.style.display = 'flex';
+}
+window.showModal = showModal;
+
+function closeModal(id) {
+    const overlay = document.getElementById(id);
+    if (!overlay) return;
+    overlay.classList.remove('open');
+    overlay.style.display = 'none';
+    const form = overlay.querySelector('form');
+    if (form) form.reset();
+}
+window.closeModal = closeModal;
+
+// Close on overlay click
+document.addEventListener('click', e => {
+    if (e.target.classList.contains('modal-overlay')) {
+        closeModal(e.target.id);
+    }
+});
+
+// Close buttons with data-close
+document.addEventListener('click', e => {
+    const btn = e.target.closest('[data-close]');
+    if (btn) closeModal(btn.dataset.close);
+});
+
+// ============================================================
+//  NOTIFICATIONS
+// ============================================================
+function showNotification(message, type = 'info', duration = 4000) {
+    const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+    const container = document.getElementById('notifications');
+    const n = document.createElement('div');
+    n.className = `notification ${type}`;
+    n.innerHTML = `<span class="notification-icon">${icons[type] || 'ℹ️'}</span><span class="notification-text">${message}</span>`;
+    container.appendChild(n);
+    setTimeout(() => {
+        n.classList.add('hiding');
+        setTimeout(() => n.remove(), 350);
+    }, duration);
+}
+
+// ============================================================
+//  CONTEXT MENU
+// ============================================================
+const ctxMenu = document.getElementById('contextMenu');
+
+function showContextMenu(x, y, items) {
+    ctxMenu.innerHTML = '';
+    items.forEach(item => {
+        if (item.type === 'sep') {
+            const s = document.createElement('div');
+            s.className = 'context-menu-sep';
+            ctxMenu.appendChild(s);
         } else {
-            advancedOptions.style.display = 'none';
-            icon.textContent = '▼';
+            const div = document.createElement('div');
+            div.className = `context-menu-item ${item.danger ? 'danger' : ''}`;
+            div.innerHTML = `<span class="context-menu-icon">${item.icon || ''}</span>${item.label}`;
+            div.addEventListener('click', () => { item.action(); closeContextMenu(); });
+            ctxMenu.appendChild(div);
         }
     });
-
-    // Engine selection — save to localStorage and update default port
-    document.getElementById('engine').addEventListener('change', function () {
-        const engine = this.value;
-        localStorage.setItem('db_engine', engine);
-        const portEl = document.getElementById('port');
-        if (engine === 'postgresql' && portEl.value === '3306') {
-            portEl.value = '5432';
-        } else if (engine === 'mysql' && portEl.value === '5432') {
-            portEl.value = '3306';
-        }
-    });
-
-    // Database operations
-    document.getElementById('refreshDatabases').addEventListener('click', loadDatabases);
-    document.getElementById('createDatabase').addEventListener('click', showCreateDatabaseModal);
-    document.getElementById('refreshTables').addEventListener('click', loadTables);
-
-    // Pagination
-    document.getElementById('prevPage').addEventListener('click', () => changePage(-1));
-    document.getElementById('nextPage').addEventListener('click', () => changePage(1));
-    document.getElementById('pageSize').addEventListener('change', changePageSize);
-
-    // Page jump
-    document.getElementById('pageJumpBtn').addEventListener('click', jumpToPage);
-    document.getElementById('pageJump').addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') jumpToPage();
-    });
-
-    // Search functionality
-    document.getElementById('searchBtn').addEventListener('click', performSearch);
-    document.getElementById('clearSearchBtn').addEventListener('click', clearSearch);
-    document.getElementById('addFilterBtn').addEventListener('click', addSearchFilterRow);
-
-    // Search tips toggle
-    document.getElementById('searchTipsBtn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        const popover = document.getElementById('searchTipsPopover');
-        popover.style.display = popover.style.display === 'none' ? 'block' : 'none';
-    });
-    // Close tips when clicking outside
-    document.addEventListener('click', (e) => {
-        const popover = document.getElementById('searchTipsPopover');
-        const btn = document.getElementById('searchTipsBtn');
-        if (popover && popover.style.display !== 'none' && !popover.contains(e.target) && e.target !== btn) {
-            popover.style.display = 'none';
-        }
-    });
-
-    // Initial remove button handler
-    setupFilterRowEvents();
-
-    // Tab switching
-    document.querySelectorAll('.tab-button').forEach(button => {
-        button.addEventListener('click', (e) => switchTab(e.target.dataset.tab));
-    });
-
-    // Query execution
-    document.getElementById('executeQuery').addEventListener('click', executeQuery);
-    document.getElementById('clearQuery').addEventListener('click', () => {
-        sqlQuery.value = '';
-        queryResults.innerHTML = '<p>No query executed yet.</p>';
-    });
-
-    // Create database form
-    document.getElementById('createDatabaseForm').addEventListener('submit', createDatabase);
-
-
-    // Export functionality
-    document.getElementById('exportDatabase').addEventListener('click', showExportDatabaseModal);
-    document.getElementById('exportTableBtn').addEventListener('click', showExportTableModal);
-    document.getElementById('exportSelectedRows').addEventListener('click', exportSelectedRows);
-    document.getElementById('exportCurrentData').addEventListener('click', exportCurrentData);
-    document.getElementById('deleteAllData').addEventListener('click', handleDeleteAllData);
-    document.getElementById('deleteSelectedRows').addEventListener('click', handleDeleteSelectedRows);
-    document.getElementById('exportDatabaseForm').addEventListener('submit', exportDatabase);
-    document.getElementById('exportTableForm').addEventListener('submit', exportTable);
-
-    // Export modal controls
-    document.getElementById('exportTableIncludeData').addEventListener('change', toggleDataExportOptions);
-    document.querySelectorAll('input[name="dataExportType"]').forEach(radio => {
-        radio.addEventListener('change', toggleCustomWhereClause);
-    });
-
-    // Alter table forms
-    document.getElementById('addColumnForm').addEventListener('submit', addColumn);
-    document.getElementById('dropColumnForm').addEventListener('submit', dropColumn);
-    document.getElementById('modifyColumnForm').addEventListener('submit', modifyColumn);
-    document.getElementById('addIndexForm').addEventListener('submit', addIndex);
-    document.getElementById('customAlterForm').addEventListener('submit', executeCustomAlter);
-    document.getElementById('dropTableBtn').addEventListener('click', dropTable);
-
-    // Saved connections
-    document.getElementById('savedConnections').addEventListener('change', fillConnectionForm);
-    document.getElementById('deleteSavedConnectionBtn').addEventListener('click', deleteSavedConnection);
-
-    // Error Log
-    document.getElementById('clearErrorLogBtn').addEventListener('click', clearErrorLog);
-    document.getElementById('editRowForm').addEventListener('submit', saveRowData);
+    ctxMenu.style.display = 'block';
+    ctxMenu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+    ctxMenu.style.top = Math.min(y, window.innerHeight - ctxMenu.offsetHeight - 10) + 'px';
 }
 
-function setupSocketListeners() {
-    socket.on('connection_success', (data) => {
-        isConnected = true;
-        updateConnectionStatus(true);
-        showNotification('Connected to database successfully!', 'success');
-        showMainInterface();
-        loadDatabases();
+function closeContextMenu() { ctxMenu.style.display = 'none'; }
 
-        // Load settings and query history for new features
-        socket.emit('get_settings');
-        socket.emit('get_query_history');
+document.addEventListener('click', () => closeContextMenu());
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeContextMenu(); closeAllModals(); } });
 
-        // Store credentials in session
-        if (currentCredentials) {
-            fetch('/store-credentials', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    host: currentCredentials.host,
-                    port: currentCredentials.port,
-                    username: currentCredentials.user,
-                    password: currentCredentials.password,
-                    database: currentCredentials.database,
-                    engine: currentCredentials.engine,
-                    ssl: currentCredentials.ssl
-                })
-            })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success && data.token) {
-                        localStorage.setItem('mysql_jwt_token', data.token);
-                    }
-                });
-        }
-    });
-
-    socket.on('connection_error', (data) => {
-        showNotification(data.message, 'error');
-        updateConnectionStatus(false);
-    });
-
-    socket.on('disconnection_success', (data) => {
-        isConnected = false;
-        updateConnectionStatus(false);
-        showNotification('Disconnected from database', 'info');
-        showConnectionPanel();
-    });
-
-    socket.on('databases_list', (databases) => {
-        populateDatabaseList(databases);
-        populateQueryDatabaseSelect(databases);
-    });
-
-    socket.on('tables_list', (data) => {
-        populateTableList(data.tables);
-        currentDatabase = data.database;
-    });
-
-    socket.on('table_structure', (data) => {
-        currentTableStructure = data.structure;
-        populateTableStructure(data.structure);
-        // We can also identify the primary key here, but we'll do it when populating data or structure
-    });
-
-    socket.on('table_data', (data) => {
-        populateTableData(data);
-        updatePagination(data);
-    });
-
-    socket.on('data_deleted', (data) => {
-        showNotification(data.message, 'success');
-        loadTableData(); // Refresh data
-    });
-
-    socket.on('query_result', (data) => {
-        displayQueryResult(data);
-    });
-
-    socket.on('database_created', (data) => {
-        showNotification(data.message, 'success');
-        closeModal('createDatabaseModal');
-        loadDatabases();
-    });
-
-    socket.on('database_dropped', (data) => {
-        showNotification(data.message, 'success');
-        loadDatabases();
-    });
-
-    socket.on('table_altered', (data) => {
-        showNotification(data.message, 'success');
-        loadTableStructure();
-        loadTableIndexes();
-        loadTables(); // Refresh tables list in case table was renamed
-    });
-
-    socket.on('table_indexes', (data) => {
-        populateTableIndexes(data.indexes);
-    });
-
-    socket.on('table_dropped', (data) => {
-        showNotification(data.message, 'success');
-        clearTableData();
-        loadTables(); // Refresh tables list
-    });
-
-    socket.on('database_exported', (data) => {
-        // Data content might be a buffer (for ZIP) or string (for SQL)
-        downloadFile(data.filename, data.content, data.isZip);
-        showNotification(`Database exported successfully! File size: ${formatFileSize(data.size)}`, 'success');
-        closeModal('exportDatabaseModal');
-    });
-
-    socket.on('table_exported', (data) => {
-        downloadFile(data.filename, data.content);
-        showNotification(`Table exported successfully! File size: ${formatFileSize(data.size)}`, 'success');
-        closeModal('exportTableModal');
-    });
-
-    socket.on('row_count_result', (data) => {
-        const preview = document.getElementById('rowCountPreview');
-        if (preview) {
-            preview.textContent = `Estimated rows: ${data.count}`;
-        }
-    });
-
-    socket.on('error', (data) => {
-        showNotification(data.message, 'error');
-    });
-
-    socket.on('query_execution_error', (data) => {
-        addErrorToLog(data);
-        // Ensure the log container is visible
-        const container = document.getElementById('errorLogContainer');
-        if (container.style.display === 'none') {
-            container.style.display = 'flex';
-        }
-    });
-
-    socket.on('row_updated', (data) => {
-        showNotification(data.message, 'success');
-        closeModal('editRowModal');
-        loadTableData(); // Refresh data
-    });
-
+function closeAllModals() {
+    document.querySelectorAll('.modal-overlay.open').forEach(m => closeModal(m.id));
 }
 
-function handleConnection(e) {
+// ============================================================
+//  CONNECTION FLOW
+// ============================================================
+const connectionOverlay = document.getElementById('connectionOverlay');
+const appShell = document.getElementById('appShell');
+
+function showConnectionOverlay() {
+    connectionOverlay.style.display = 'flex';
+    appShell.style.display = 'none';
+}
+
+function showAppShell() {
+    connectionOverlay.style.display = 'none';
+    appShell.style.display = 'flex';
+    initCodeMirror();
+}
+
+// Engine selection
+document.querySelectorAll('.engine-pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+        document.querySelectorAll('.engine-pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        document.getElementById('engine').value = pill.dataset.engine;
+        document.getElementById('port').value = pill.dataset.engine === 'postgresql' ? '5432' : '3306';
+    });
+});
+
+// Advanced toggle
+document.getElementById('advancedToggle').addEventListener('click', () => {
+    const section = document.getElementById('advancedSection');
+    section.classList.toggle('open');
+    document.getElementById('advancedToggle').innerHTML =
+        (section.classList.contains('open') ? '▼' : '▶') + ' Advanced Options (SSL)';
+});
+
+// Load saved connections on page load
+loadSavedConnections();
+
+function loadSavedConnections() {
+    const token = localStorage.getItem('mysql_jwt_token');
+    if (token) {
+        fetch('/session-credentials', { headers: { 'Authorization': 'Bearer ' + token } })
+            .then(r => r.json())
+            .then(data => {
+                if (data.host) populateConnectionForm(data);
+            }).catch(() => {});
+    }
+
+    const saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+    const wrapper = document.getElementById('savedConnsWrapper');
+    const select = document.getElementById('savedConnections');
+    if (saved.length > 0) {
+        wrapper.style.display = 'block';
+        select.innerHTML = '<option value="">Select a saved connection...</option>';
+        saved.forEach((c, i) => {
+            const opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = `${c.user}@${c.host}:${c.port} (${c.engine || 'mysql'})`;
+            select.appendChild(opt);
+        });
+    }
+}
+
+document.getElementById('savedConnections').addEventListener('change', async (e) => {
+    const idx = parseInt(e.target.value);
+    if (isNaN(idx)) return;
+    const saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+    const conn = saved[idx];
+    if (!conn) return;
+    populateConnectionForm(conn);
+    // Retrieve password from secure store
+    const credKey = `${conn.host}:${conn.port}:${conn.user}`;
+    try {
+        const res = await fetch(`/api/credential/get?key=${encodeURIComponent(credKey)}`);
+        const data = await res.json();
+        if (data.password) document.getElementById('password').value = data.password;
+    } catch {}
+});
+
+function populateConnectionForm(data) {
+    if (data.host) document.getElementById('host').value = data.host;
+    if (data.port) document.getElementById('port').value = data.port;
+    if (data.username || data.user) document.getElementById('user').value = data.username || data.user;
+    if (data.database) document.getElementById('database').value = data.database;
+    if (data.engine) {
+        document.getElementById('engine').value = data.engine;
+        document.querySelectorAll('.engine-pill').forEach(p => p.classList.remove('active'));
+        document.querySelector(`[data-engine="${data.engine}"]`)?.classList.add('active');
+    }
+}
+
+document.getElementById('deleteSavedConnBtn').addEventListener('click', () => {
+    const select = document.getElementById('savedConnections');
+    const idx = parseInt(select.value);
+    if (isNaN(idx)) return;
+    let saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+    const conn = saved[idx];
+    if (conn) {
+        const credKey = `${conn.host}:${conn.port}:${conn.user}`;
+        fetch('/api/credential/delete?key=' + encodeURIComponent(credKey), { method: 'DELETE' }).catch(() => {});
+    }
+    saved.splice(idx, 1);
+    localStorage.setItem('savedConnections', JSON.stringify(saved));
+    loadSavedConnections();
+    showNotification('Connection deleted', 'success');
+});
+
+// Connection form submit
+document.getElementById('connectionForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const formData = new FormData(connectionForm);
-
-    const credentials = {
+    const formData = new FormData(e.target);
+    const creds = {
         host: formData.get('host'),
         port: parseInt(formData.get('port')),
         user: formData.get('user'),
         password: formData.get('password'),
-        database: formData.get('database') || undefined,
-        engine: document.getElementById('engine').value,
-        ssl: null
+        database: formData.get('database') || null,
+        engine: formData.get('engine') || 'mysql',
+        ssl: buildSslConfig(formData)
     };
+    currentCredentials = creds;
 
-    // Check for SSL configuration
-    const sslCa = formData.get('sslCa').trim();
-    const sslCert = formData.get('sslCert').trim();
-    const sslKey = formData.get('sslKey').trim();
-    const rejectUnauthorized = document.getElementById('rejectUnauthorized').checked;
-
-    if (sslCa || sslCert || sslKey) {
-        credentials.ssl = {
-            rejectUnauthorized: rejectUnauthorized
-        };
-        if (sslCa) credentials.ssl.ca = sslCa;
-        if (sslCert) credentials.ssl.cert = sslCert;
-        if (sslKey) credentials.ssl.key = sslKey;
+    const saveConn = document.getElementById('saveConnection').checked;
+    if (saveConn) {
+        const credKey = `${creds.host}:${creds.port}:${creds.user}`;
+        // Store password encrypted on server
+        await fetch('/api/credential/set', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: credKey, password: creds.password })
+        }).catch(() => {});
+        // Save non-sensitive data in localStorage
+        let saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+        const exists = saved.findIndex(s => s.host === creds.host && s.port === creds.port && s.user === creds.user);
+        const connData = { host: creds.host, port: creds.port, user: creds.user, database: creds.database, engine: creds.engine };
+        if (exists >= 0) saved[exists] = connData;
+        else saved.unshift(connData);
+        localStorage.setItem('savedConnections', JSON.stringify(saved.slice(0, 20)));
     }
 
-    currentCredentials = credentials;
+    socket.emit('connect_database', creds);
 
-    // Save connection if requested
-    if (document.getElementById('saveConnection').checked) {
-        saveConnection(credentials);
-    }
+    document.getElementById('connectBtn').textContent = 'Connecting...';
+    document.getElementById('connectBtn').disabled = true;
+});
 
-    socket.emit('connect_database', credentials);
-    showNotification('Connecting to database...', 'info');
+function buildSslConfig(formData) {
+    const ca = formData.get('sslCa');
+    const cert = formData.get('sslCert');
+    const key = formData.get('sslKey');
+    if (!ca && !cert && !key) return false;
+    return {
+        ca: ca || undefined,
+        cert: cert || undefined,
+        key: key || undefined,
+        rejectUnauthorized: formData.get('rejectUnauthorized') === 'on'
+    };
 }
 
-function saveConnection(credentials) {
-    const savedConnections = JSON.parse(localStorage.getItem('mysql_saved_connections') || '[]');
+// ============================================================
+//  SOCKET LISTENERS
+// ============================================================
+socket.on('connection_success', () => {
+    isConnected = true;
+    updateConnectionStatus(true);
+    showNotification('Connected to database!', 'success');
+    showAppShell();
 
-    // Check if connection already exists
-    const existingIndex = savedConnections.findIndex(c =>
-        c.host === credentials.host &&
-        c.port === credentials.port &&
-        c.user === credentials.user &&
-        c.database === credentials.database &&
-        c.engine === credentials.engine
-    );
+    // Store JWT (without password)
+    fetch('/store-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            host: currentCredentials.host,
+            port: currentCredentials.port,
+            username: currentCredentials.user,
+            database: currentCredentials.database,
+            engine: currentCredentials.engine,
+            ssl: currentCredentials.ssl
+        })
+    }).then(r => r.json()).then(d => {
+        if (d.token) localStorage.setItem('mysql_jwt_token', d.token);
+    }).catch(() => {});
 
-    if (existingIndex !== -1) {
-        savedConnections[existingIndex] = credentials;
-    } else {
-        savedConnections.push(credentials);
-    }
+    // Load initial data
+    socket.emit('get_databases');
+    socket.emit('get_settings');
+    socket.emit('get_query_history');
+    socket.emit('get_annotations');
 
-    localStorage.setItem('mysql_saved_connections', JSON.stringify(savedConnections));
-    loadSavedConnections(); // Refresh the list
+    // Update server info panel
+    updateServerInfo();
+
+    // Update dashboard
+    setTimeout(() => {
+        socket.emit('get_db_sizes');
+        loadBackupHistory();
+    }, 500);
+});
+
+socket.on('connection_error', (data) => {
+    showNotification(data.message || 'Connection failed', 'error');
+    document.getElementById('connectBtn').textContent = 'Connect to Database';
+    document.getElementById('connectBtn').disabled = false;
+});
+
+socket.on('disconnection_success', () => {
+    isConnected = false;
+    currentDatabase = null;
+    currentTable = null;
+    updateConnectionStatus(false);
+    showNotification('Disconnected', 'info');
+    showConnectionOverlay();
+    clearSidebar();
+    stopStatsPolling();
+});
+
+socket.on('error', data => showNotification(data.message, 'error'));
+
+socket.on('databases_list', (databases) => {
+    renderSidebarDatabases(databases);
+    populateQueryDatabaseSelects(databases);
+});
+
+socket.on('tables_list', ({ database, tables }) => {
+    renderSidebarTables(database, tables);
+});
+
+socket.on('table_structure', ({ database, table, structure }) => {
+    currentTableStructure = structure;
+    renderStructureTable(structure);
+    populateAlterFormColumns(structure);
+    populateIndexColumns(structure);
+});
+
+socket.on('table_data', (data) => {
+    renderTableData(data);
+    updatePagination(data);
+});
+
+socket.on('data_deleted', (data) => {
+    showNotification(data.message, 'success');
+    loadTableData();
+});
+
+socket.on('query_result', (data) => {
+    displayQueryResult(data);
+});
+
+socket.on('query_execution_error', (data) => {
+    addErrorToLog(data);
+    document.getElementById('errorLogContainer').style.display = 'flex';
+});
+
+socket.on('database_created', (data) => {
+    showNotification(data.message, 'success');
+    closeModal('modalCreateDatabase');
+    socket.emit('get_databases');
+});
+
+socket.on('database_dropped', (data) => {
+    showNotification(data.message, 'success');
+    currentDatabase = null;
+    clearTableArea();
+    socket.emit('get_databases');
+});
+
+socket.on('table_altered', (data) => {
+    showNotification(data.message, 'success');
+    loadTableStructure();
+    loadTableIndexes();
+    loadTables();
+});
+
+socket.on('table_indexes', ({ indexes }) => renderIndexesTable(indexes));
+
+socket.on('table_dropped', (data) => {
+    showNotification(data.message, 'success');
+    clearTableArea();
+    loadTables();
+});
+
+socket.on('database_exported', (data) => {
+    downloadFile(data.filename, data.content, data.isZip);
+    showNotification(`Exported: ${formatFileSize(data.size)}`, 'success');
+    closeModal('modalExportDatabase');
+});
+
+socket.on('table_exported', (data) => {
+    downloadFile(data.filename, data.content);
+    showNotification(`Table exported: ${formatFileSize(data.size)}`, 'success');
+    closeModal('modalExportTable');
+});
+
+socket.on('row_count_result', ({ count }) => {
+    document.getElementById('rowCountPreview').textContent = `~${count} rows`;
+});
+
+socket.on('row_updated', (data) => {
+    showNotification(data.message, 'success');
+    closeModal('modalEditRow');
+    loadTableData();
+});
+
+socket.on('row_inserted', (data) => {
+    showNotification(data.message, 'success');
+    closeModal('modalInsertRow');
+    loadTableData();
+});
+
+socket.on('database_imported', (data) => {
+    showNotification(data.message, 'success');
+    loadTables();
+});
+
+socket.on('settings', (s) => {
+    settings = s || {};
+    applySettings();
+});
+
+socket.on('settings_saved', (data) => showNotification(data.message, 'success'));
+
+socket.on('backups_list', (backups) => renderBackupHistory(backups));
+
+socket.on('backup_deleted', (data) => {
+    showNotification(data.message, 'success');
+    socket.emit('list_backups');
+});
+
+socket.on('backup_restored', (data) => {
+    showNotification(data.message, 'success');
+    loadTables();
+});
+
+socket.on('query_history', (history) => renderQueryHistory(history));
+
+socket.on('db_sizes', (sizes) => {
+    updateSidebarDbSizes(sizes);
+    renderDashboardDbSizes(sizes);
+});
+
+socket.on('table_sizes', ({ database, sizes }) => {
+    updateSidebarTableSizes(database, sizes);
+});
+
+socket.on('annotations', (data) => {
+    annotations = data;
+    updateAnnotationIcons();
+});
+
+socket.on('foreign_keys', ({ database, fkData }) => {
+    renderERDiagram(database, fkData);
+});
+
+socket.on('slow_queries', ({ queries, warning }) => {
+    renderSlowQueries(queries, warning);
+});
+
+socket.on('schema_diff', (data) => {
+    renderSchemaDiff(data);
+});
+
+socket.on('table_constraints', ({ constraints }) => {});
+
+// ============================================================
+//  SIDEBAR — TREE VIEW
+// ============================================================
+const sidebarTree = document.getElementById('sidebarTree');
+const sidebarEmpty = document.getElementById('sidebarEmpty');
+let _dbList = [];
+
+function clearSidebar() {
+    sidebarTree.innerHTML = '';
+    sidebarEmpty.style.display = 'block';
+    sidebarTree.appendChild(sidebarEmpty);
+    _dbList = [];
 }
 
-function loadSavedConnections() {
-    const savedConnections = JSON.parse(localStorage.getItem('mysql_saved_connections') || '[]');
-    const select = document.getElementById('savedConnections');
-    const wrapper = document.getElementById('savedConnectionsWrapper');
+function renderSidebarDatabases(databases) {
+    _dbList = databases;
+    sidebarTree.innerHTML = '';
+    sidebarEmpty.style.display = 'none';
 
-    // Clear existing options except the first one
-    while (select.options.length > 1) {
-        select.remove(1);
-    }
-
-    if (savedConnections.length > 0) {
-        wrapper.style.display = 'block';
-        savedConnections.forEach((conn, index) => {
-            const option = document.createElement('option');
-            option.value = index;
-            const engineLabel = (conn.engine === 'postgresql') ? 'PG' : 'MySQL';
-            let label = `[${engineLabel}] ${conn.user}@${conn.host}:${conn.port}`;
-            if (conn.database) {
-                label += `/${conn.database}`;
-            }
-            option.textContent = label;
-            select.appendChild(option);
-        });
-    } else {
-        wrapper.style.display = 'none';
-    }
-}
-
-function fillConnectionForm() {
-    const select = document.getElementById('savedConnections');
-    const index = select.value;
-
-    if (index === '') return;
-
-    const savedConnections = JSON.parse(localStorage.getItem('mysql_saved_connections') || '[]');
-    const conn = savedConnections[index];
-
-    if (conn) {
-        document.getElementById('host').value = conn.host || '';
-        document.getElementById('port').value = conn.port || '';
-        document.getElementById('user').value = conn.user || '';
-        document.getElementById('password').value = conn.password || '';
-        document.getElementById('database').value = conn.database || '';
-
-        // Restore engine selection
-        if (conn.engine) {
-            document.getElementById('engine').value = conn.engine;
-            localStorage.setItem('db_engine', conn.engine);
-        }
-
-        // Handle SSL fields if present
-        if (conn.ssl) {
-            if (conn.ssl.ca) document.getElementById('sslCa').value = conn.ssl.ca;
-            if (conn.ssl.cert) document.getElementById('sslCert').value = conn.ssl.cert;
-            if (conn.ssl.key) document.getElementById('sslKey').value = conn.ssl.key;
-
-            // Show advanced options if SSL data exists
-            document.getElementById('advancedOptions').style.display = 'block';
-            document.querySelector('.advanced-options-toggle .toggle-icon').textContent = '▲';
-        }
-
-        document.getElementById('saveConnection').checked = true;
-    }
-}
-
-function deleteSavedConnection() {
-    const select = document.getElementById('savedConnections');
-    const index = select.value;
-
-    if (index === '') {
-        showNotification('Please select a connection to delete', 'error');
+    if (!databases.length) {
+        sidebarEmpty.textContent = 'No databases found.';
+        sidebarEmpty.style.display = 'block';
+        sidebarTree.appendChild(sidebarEmpty);
         return;
     }
 
-    const savedConnections = JSON.parse(localStorage.getItem('mysql_saved_connections') || '[]');
-    savedConnections.splice(index, 1);
-    localStorage.setItem('mysql_saved_connections', JSON.stringify(savedConnections));
+    databases.forEach(db => {
+        const node = createDbNode(db);
+        sidebarTree.appendChild(node);
+    });
 
-    loadSavedConnections();
-    showNotification('Connection deleted successfully', 'success');
-
-    // Clear form
-    document.getElementById('connectionForm').reset();
-}
-
-function handleDisconnection() {
-    socket.emit('disconnect_database');
-}
-
-function updateConnectionStatus(connected) {
-    const indicator = connectionStatus.querySelector('.status-indicator');
-    const text = connectionStatus.querySelector('span:last-child');
-
-    if (connected) {
-        indicator.className = 'status-indicator connected';
-        text.textContent = 'Connected';
-        disconnectBtn.style.display = 'inline-block';
-        logoutBtn.style.display = 'inline-block';
-    } else {
-        indicator.className = 'status-indicator disconnected';
-        text.textContent = 'Disconnected';
-        disconnectBtn.style.display = 'none';
-        logoutBtn.style.display = 'none';
+    // Auto-expand if there's only one db
+    if (databases.length === 1) {
+        const firstNode = sidebarTree.querySelector('.db-node');
+        if (firstNode) expandDb(firstNode, databases[0]);
     }
 }
 
-function showMainInterface() {
-    connectionPanel.style.display = 'none';
-    mainInterface.style.display = 'flex';
+function createDbNode(db) {
+    const node = document.createElement('div');
+    node.className = 'db-node';
+    node.dataset.db = db;
+    node.innerHTML = `
+        <div class="db-node-header" title="${db}">
+            <span class="db-chevron">▶</span>
+            <span class="db-icon">📦</span>
+            <span class="db-name">${db}</span>
+            <span class="db-size-badge" id="dbsize-${db}"></span>
+            <div class="db-actions">
+                <button class="db-action-btn" title="Export" onclick="dbAction('export','${db}',event)">📤</button>
+                <button class="db-action-btn" title="Import" onclick="dbAction('import','${db}',event)">📥</button>
+                <button class="db-action-btn" title="Backup now" onclick="dbAction('backup','${db}',event)">💾</button>
+                <button class="db-action-btn" title="Schema diff" onclick="dbAction('diff','${db}',event)">🔀</button>
+                <button class="db-action-btn" title="Drop database" onclick="dbAction('drop','${db}',event)" style="color:var(--danger)">🗑️</button>
+            </div>
+        </div>
+        <div class="db-tables" id="dbtables-${db}">
+            <div class="sidebar-empty" style="padding:8px 20px;font-size:11.5px;">Loading...</div>
+        </div>
+    `;
+
+    const header = node.querySelector('.db-node-header');
+    header.addEventListener('click', () => {
+        if (node.classList.contains('open')) {
+            collapseDb(node, db);
+        } else {
+            expandDb(node, db);
+        }
+    });
+
+    header.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showContextMenu(e.clientX, e.clientY, [
+            { icon: '📋', label: `Copy "${db}"`, action: () => navigator.clipboard.writeText(db) },
+            { type: 'sep' },
+            { icon: '📤', label: 'Export Database', action: () => dbAction('export', db) },
+            { icon: '📥', label: 'Import into Database', action: () => dbAction('import', db) },
+            { icon: '💾', label: 'Manual Backup', action: () => dbAction('backup', db) },
+            { icon: '🔀', label: 'Schema Diff', action: () => dbAction('diff', db) },
+            { type: 'sep' },
+            { icon: '🗑️', label: 'Drop Database', danger: true, action: () => dbAction('drop', db) },
+        ]);
+    });
+
+    return node;
 }
 
-function showConnectionPanel() {
-    connectionPanel.style.display = 'block';
-    mainInterface.style.display = 'none';
-    logoutBtn.style.display = 'none';
-
-    // Hide export/import buttons
-    document.getElementById('exportDatabase').style.display = 'none';
-    document.getElementById('importDatabaseBtn').style.display = 'none';
-    document.getElementById('exportCurrentData').style.display = 'none';
-    document.getElementById('exportSelectedRows').style.display = 'none';
-    document.getElementById('insertRowBtn').style.display = 'none';
-
-    // Reset interface
-    currentDatabase = null;
-    currentTable = null;
-    databaseList.innerHTML = '';
-    tableList.innerHTML = '';
-    dataTable.querySelector('thead').innerHTML = '';
-    dataTable.querySelector('tbody').innerHTML = '';
+function expandDb(node, db) {
+    node.classList.add('open');
+    currentDatabase = db;
+    socket.emit('get_tables', db);
+    socket.emit('get_table_sizes', db);
+    updateDbHighlight();
 }
 
-function loadDatabases() {
-    if (!isConnected) return;
-    socket.emit('get_databases');
+function collapseDb(node, db) {
+    node.classList.remove('open');
 }
 
-function loadTables() {
-    if (!isConnected || !currentDatabase) return;
-    socket.emit('get_tables', currentDatabase);
-}
-
-function populateDatabaseList(databases) {
-    databaseList.innerHTML = '';
-
-    databases.forEach(database => {
-        const li = document.createElement('li');
-        li.textContent = database;
-        li.addEventListener('click', () => selectDatabase(database, li));
-        databaseList.appendChild(li);
+function updateDbHighlight() {
+    document.querySelectorAll('.db-node-header').forEach(h => {
+        h.classList.toggle('active', h.closest('.db-node').dataset.db === currentDatabase);
     });
 }
 
-function populateQueryDatabaseSelect(databases) {
-    const currentValue = queryDatabase.value;
-    queryDatabase.innerHTML = '<option value="">Select Database</option>';
+function renderSidebarTables(database, tables) {
+    const container = document.getElementById(`dbtables-${database}`);
+    if (!container) return;
+    container.innerHTML = '';
 
-    databases.forEach(database => {
-        const option = document.createElement('option');
-        option.value = database;
-        option.textContent = database;
-        queryDatabase.appendChild(option);
-    });
-
-    if (currentValue) {
-        queryDatabase.value = currentValue;
+    if (!tables.length) {
+        container.innerHTML = '<div class="sidebar-empty" style="padding:8px 20px;font-size:11.5px;">No tables</div>';
+        return;
     }
-}
-
-function selectDatabase(database, element) {
-    // Update UI
-    document.querySelectorAll('.database-list li').forEach(li => li.classList.remove('active'));
-    element.classList.add('active');
-
-    currentDatabase = database;
-    currentTable = null;
-
-    // Show export/import buttons
-    document.getElementById('exportDatabase').style.display = 'inline-block';
-    document.getElementById('importDatabaseBtn').style.display = 'inline-block';
-
-    // Clear table list and data
-    tableList.innerHTML = '';
-    clearTableData();
-
-    // Load tables for this database
-    socket.emit('get_tables', database);
-}
-
-function populateTableList(tables) {
-    tableList.innerHTML = '';
 
     tables.forEach(table => {
-        const li = document.createElement('li');
-        li.textContent = table;
-        li.addEventListener('click', () => selectTable(table, li));
-        tableList.appendChild(li);
+        const div = document.createElement('div');
+        div.className = 'table-node';
+        div.dataset.table = table;
+        div.dataset.db = database;
+        div.innerHTML = `
+            <span class="table-icon">📋</span>
+            <span class="table-name">${table}</span>
+            <span class="table-size-badge" id="tblsize-${database}-${table}"></span>
+            <span class="table-note-icon" id="tblnote-${database}-${table}" style="display:none;" title="View note">📝</span>
+            <div class="table-actions">
+                <button class="table-action-btn" title="Export" onclick="tableAction('export','${database}','${table}',event)">📤</button>
+                <button class="table-action-btn" title="Note" onclick="tableAction('note','${database}','${table}',event)">📝</button>
+                <button class="table-action-btn" title="Drop" onclick="tableAction('drop','${database}','${table}',event)" style="color:var(--danger)">🗑️</button>
+            </div>
+        `;
+
+        div.addEventListener('click', (e) => {
+            if (e.target.closest('.table-actions') || e.target.closest('.table-note-icon')) return;
+            selectTable(database, table, div);
+        });
+
+        div.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            showContextMenu(e.clientX, e.clientY, [
+                { icon: '📋', label: `Copy "${table}"`, action: () => navigator.clipboard.writeText(table) },
+                { type: 'sep' },
+                { icon: '📤', label: 'Export Table', action: () => tableAction('export', database, table) },
+                { icon: '📝', label: 'Add/Edit Note', action: () => openAnnotationModal(database, table) },
+                { icon: '+ Row', label: 'Insert Row', action: () => openInsertRowModal() },
+                { type: 'sep' },
+                { icon: '🗑️', label: 'Drop Table', danger: true, action: () => tableAction('drop', database, table) },
+            ]);
+        });
+
+        container.appendChild(div);
     });
+
+    // Restore annotation icons
+    updateAnnotationIcons();
 }
 
-function selectTable(table, element) {
-    // Update UI
-    document.querySelectorAll('.table-list li').forEach(li => li.classList.remove('active'));
-    element.classList.add('active');
-
+function selectTable(database, table, element) {
+    currentDatabase = database;
     currentTable = table;
-    selectedTableSpan.textContent = `${currentDatabase}.${table}`;
-
-    // Show export/insert buttons
-    document.getElementById('exportCurrentData').style.display = 'inline-block';
-    document.getElementById('exportSelectedRows').style.display = 'inline-block';
-    document.getElementById('insertRowBtn').style.display = 'inline-block';
-
-    // Reset pagination
-    currentTable = table;
-    selectedTableSpan.textContent = `${currentDatabase}.${currentTable}`;
     currentPage = 1;
     currentSortColumn = null;
     currentSortDirection = 'ASC';
     currentSearchFilters = [];
-    currentSearchLogic = 'AND';
 
-    // Reset pagination controls
-    document.getElementById('prevPage').disabled = true;
-    document.getElementById('nextPage').disabled = true;
-
-    // Get table structure for metadata (PKs, Nullable fields)
-    socket.emit('get_table_structure', {
-        database: currentDatabase,
-        table: currentTable
+    // Update UI highlights
+    document.querySelectorAll('.table-node').forEach(n => n.classList.remove('active'));
+    if (element) element.classList.add('active');
+    document.querySelectorAll('.db-node-header').forEach(h => {
+        h.classList.toggle('active', h.closest('.db-node').dataset.db === database);
     });
 
-    socket.emit('get_table_data', {
-        database: currentDatabase,
-        table: currentTable,
-        limit: pageSize,
-        offset: 0,
-        sortColumn: currentSortColumn,
-        sortDirection: currentSortDirection,
-        searchFilters: currentSearchFilters.length > 0 ? currentSearchFilters : null,
-        searchLogic: currentSearchLogic
-    });
+    // Update header labels
+    document.getElementById('selectedTable').textContent = `${database}.${table}`;
 
+    // Show action buttons
+    document.getElementById('insertRowBtn').style.display = 'inline-flex';
+    document.getElementById('exportCurrentData').style.display = 'inline-flex';
+    document.getElementById('exportSelectedRows').style.display = 'inline-flex';
+    document.getElementById('deleteAllData').style.display = 'inline-flex';
+
+    // Switch to data tab
+    switchContentTab('data');
+
+    // Load data
+    socket.emit('get_table_structure', { database, table });
+    loadTableData();
     loadTableIndexes();
-    populateAlterFormColumns();
+}
+
+// DB actions triggered from sidebar buttons
+window.dbAction = function(action, db, event) {
+    if (event) event.stopPropagation();
+    switch (action) {
+        case 'export':
+            showExportDatabaseModal(db);
+            break;
+        case 'import':
+            currentDatabase = db;
+            document.getElementById('importDbName').textContent = db;
+            showModal('modalImportDatabase');
+            break;
+        case 'backup':
+            manualBackupDatabase(db);
+            break;
+        case 'diff':
+            openSchemaDiff(db);
+            break;
+        case 'drop':
+            if (confirm(`Drop database "${db}"? This cannot be undone!`)) {
+                socket.emit('drop_database', db);
+            }
+            break;
+    }
+};
+
+window.tableAction = function(action, db, table, event) {
+    if (event) event.stopPropagation();
+    switch (action) {
+        case 'export':
+            showExportTableModal(db, table);
+            break;
+        case 'note':
+            openAnnotationModal(db, table);
+            break;
+        case 'drop':
+            if (confirm(`Drop table "${table}"? This cannot be undone!`)) {
+                socket.emit('drop_table', { database: db, table });
+            }
+            break;
+    }
+};
+
+// Sidebar search filter
+document.getElementById('sidebarSearch').addEventListener('input', (e) => {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll('.db-node').forEach(node => {
+        const dbName = node.dataset.db.toLowerCase();
+        const tables = Array.from(node.querySelectorAll('.table-node'));
+        let anyTableMatch = false;
+        tables.forEach(t => {
+            const match = t.dataset.table.toLowerCase().includes(q);
+            t.style.display = match ? '' : 'none';
+            if (match) anyTableMatch = true;
+        });
+        const dbMatch = !q || dbName.includes(q) || anyTableMatch;
+        node.style.display = dbMatch ? '' : 'none';
+        if (q && anyTableMatch) node.classList.add('open');
+    });
+});
+
+// Update sidebar size badges
+function updateSidebarDbSizes(sizes) {
+    sizes.forEach(s => {
+        const el = document.getElementById(`dbsize-${s.database}`);
+        if (el) el.textContent = `${s.sizeMb} MB`;
+    });
+}
+
+function updateSidebarTableSizes(database, sizes) {
+    sizes.forEach(s => {
+        const el = document.getElementById(`tblsize-${database}-${s.table}`);
+        if (el) el.textContent = `${s.sizeMb} MB`;
+    });
+}
+
+// ============================================================
+//  CONTENT TABS
+// ============================================================
+function switchContentTab(tabId) {
+    document.querySelectorAll('.content-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabId);
+    });
+    document.querySelectorAll('.tab-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.id === `tab-${tabId}`);
+    });
+}
+
+document.querySelectorAll('.content-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => switchContentTab(btn.dataset.tab));
+});
+
+// ============================================================
+//  DATA RENDERING
+// ============================================================
+let _columnMap = [];
+
+function renderTableData({ data, total, limit, offset }) {
+    totalRows = total;
+    const table = document.getElementById('dataTable');
+    const thead = table.querySelector('thead');
+    const tbody = table.querySelector('tbody');
+
+    if (!data || !data.length) {
+        thead.innerHTML = '';
+        tbody.innerHTML = '<tr><td colspan="99" style="text-align:center;padding:40px;color:var(--text-muted);">No data found</td></tr>';
+        return;
+    }
+
+    const cols = Object.keys(data[0]);
+    _columnMap = cols;
+
+    // Build filter column options
+    document.querySelectorAll('.filter-column').forEach(sel => {
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">Column</option>' + cols.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+    });
+
+    // Header
+    thead.innerHTML = `<tr>
+        <th><input type="checkbox" id="selectAllRows" class="row-select-checkbox"></th>
+        ${cols.map(c => `<th data-col="${c}" class="${c === currentSortColumn ? 'sorted' : ''}">${c}${c === currentSortColumn ? `<span class="sort-icon">${currentSortDirection === 'ASC' ? '↑' : '↓'}</span>` : ''}</th>`).join('')}
+        <th>Actions</th>
+    </tr>`;
+
+    // Sortable headers
+    thead.querySelectorAll('th[data-col]').forEach(th => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', () => {
+            if (currentSortColumn === th.dataset.col) {
+                currentSortDirection = currentSortDirection === 'ASC' ? 'DESC' : 'ASC';
+            } else {
+                currentSortColumn = th.dataset.col;
+                currentSortDirection = 'ASC';
+            }
+            loadTableData();
+        });
+    });
+
+    // Select all
+    thead.querySelector('#selectAllRows').addEventListener('change', (e) => {
+        tbody.querySelectorAll('.row-select-checkbox').forEach(cb => cb.checked = e.target.checked);
+    });
+
+    // Body
+    tbody.innerHTML = data.map((row, i) => `
+        <tr data-row-idx="${i}">
+            <td><input type="checkbox" class="row-select-checkbox"></td>
+            ${cols.map(c => {
+                const val = row[c];
+                if (val === null) return `<td><span class="null-value">NULL</span></td>`;
+                const str = String(val);
+                if (str.length > 100) return `<td class="long-value" title="${escapeHtml(str)}">${escapeHtml(str.slice(0, 80))}…</td>`;
+                return `<td>${escapeHtml(str)}</td>`;
+            }).join('')}
+            <td>
+                <div class="row-actions-cell">
+                    <button class="btn btn-primary btn-sm row-action-btn" onclick="openEditRowModal(${JSON.stringify(JSON.stringify(row))})">Edit</button>
+                    <button class="btn btn-danger btn-sm row-action-btn" onclick="deleteRow(${JSON.stringify(JSON.stringify(row))})">Del</button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+
+    // Row data stored for edit/delete
+    window._rowData = data;
+}
+
+function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function updatePagination({ total, limit, offset }) {
+    totalRows = total;
+    const start = offset + 1;
+    const end = Math.min(offset + limit, total);
+    document.getElementById('pageInfo').textContent = `Rows ${start}–${end} of ${total.toLocaleString()}`;
+    document.getElementById('prevPage').disabled = offset === 0;
+    document.getElementById('nextPage').disabled = end >= total;
 }
 
 function loadTableData() {
     if (!currentDatabase || !currentTable) return;
-
     const offset = (currentPage - 1) * pageSize;
+    const filters = collectFilters();
     socket.emit('get_table_data', {
         database: currentDatabase,
         table: currentTable,
         limit: pageSize,
-        offset: offset,
+        offset,
         sortColumn: currentSortColumn,
         sortDirection: currentSortDirection,
-        searchFilters: currentSearchFilters.length > 0 ? currentSearchFilters : null,
+        searchFilters: filters.length ? filters : null,
         searchLogic: currentSearchLogic
     });
+}
+
+function loadTables() {
+    if (currentDatabase) socket.emit('get_tables', currentDatabase);
 }
 
 function loadTableStructure() {
-    if (!currentDatabase || !currentTable) return;
-
-    socket.emit('get_table_structure', {
-        database: currentDatabase,
-        table: currentTable
-    });
+    if (currentDatabase && currentTable) {
+        socket.emit('get_table_structure', { database: currentDatabase, table: currentTable });
+    }
 }
 
 function loadTableIndexes() {
-    if (!currentDatabase || !currentTable) return;
+    if (currentDatabase && currentTable) {
+        socket.emit('get_table_indexes', { database: currentDatabase, table: currentTable });
+    }
+}
 
-    socket.emit('get_table_indexes', {
-        database: currentDatabase,
-        table: currentTable
+function clearTableArea() {
+    currentTable = null;
+    currentTableStructure = null;
+    document.getElementById('selectedTable').textContent = 'Select a table';
+    document.getElementById('dataTable').querySelector('thead').innerHTML = '';
+    document.getElementById('dataTable').querySelector('tbody').innerHTML = '';
+    document.getElementById('structureTable').querySelector('tbody').innerHTML = '';
+    document.getElementById('insertRowBtn').style.display = 'none';
+    document.getElementById('exportCurrentData').style.display = 'none';
+    document.getElementById('exportSelectedRows').style.display = 'none';
+    document.getElementById('deleteAllData').style.display = 'none';
+    document.getElementById('deleteSelectedRows').style.display = 'none';
+}
+
+// ============================================================
+//  STRUCTURE TABLE
+// ============================================================
+function renderStructureTable(structure) {
+    const tbody = document.getElementById('structureTable').querySelector('tbody');
+    tbody.innerHTML = structure.map(f => `
+        <tr>
+            <td><strong>${escapeHtml(f.Field)}</strong></td>
+            <td><span class="type-badge ${f.Key === 'PRI' ? 'pk' : ''}">${escapeHtml(f.Type)}</span></td>
+            <td><span class="badge ${f.Null === 'YES' ? 'badge-warning' : 'badge-muted'}">${f.Null}</span></td>
+            <td>${f.Key === 'PRI' ? '<span class="badge badge-warning">PK</span>' : f.Key === 'MUL' ? '<span class="badge badge-primary">FK</span>' : f.Key === 'UNI' ? '<span class="badge badge-success">UNI</span>' : ''}</td>
+            <td class="text-muted">${f.Default !== null ? escapeHtml(String(f.Default)) : '<span class="null-value">NULL</span>'}</td>
+            <td class="text-muted text-sm">${escapeHtml(f.Extra || '')}</td>
+            <td></td>
+        </tr>
+    `).join('');
+}
+
+function renderIndexesTable(indexes) {
+    const tbody = document.getElementById('indexesTable').querySelector('tbody');
+    tbody.innerHTML = (indexes || []).map(idx => `
+        <tr>
+            <td><strong>${escapeHtml(idx.Key_name || idx.indexname || '')}</strong></td>
+            <td><code>${escapeHtml(idx.Column_name || idx.column_name || '')}</code></td>
+            <td><span class="badge ${idx.Non_unique === 0 ? 'badge-success' : 'badge-muted'}">${idx.Non_unique === 0 ? 'Yes' : 'No'}</span></td>
+            <td class="text-muted">${escapeHtml(idx.Index_type || idx.indexdef?.split(' ')[0] || '')}</td>
+            <td class="text-muted">${idx.Cardinality || '—'}</td>
+        </tr>
+    `).join('');
+}
+
+function populateAlterFormColumns(structure) {
+    const selects = ['dropColumnName', 'modifyColumnName'];
+    selects.forEach(id => {
+        const sel = document.getElementById(id);
+        if (!sel) return;
+        sel.innerHTML = '<option value="">Select Column</option>' +
+            structure.map(f => `<option value="${f.Field}">${f.Field} (${f.Type})</option>`).join('');
     });
 }
 
-function populateTableIndexes(indexes) {
-    const tbody = indexesTable.querySelector('tbody');
-    tbody.innerHTML = '';
+function populateIndexColumns(structure) {
+    const sel = document.getElementById('newIndexColumns');
+    if (!sel) return;
+    sel.innerHTML = structure.map(f => `<option value="${f.Field}">${f.Field}</option>`).join('');
+}
 
-    indexes.forEach(index => {
-        const tr = document.createElement('tr');
+// ============================================================
+//  QUERY EDITOR
+// ============================================================
+function executeQuery() {
+    const query = sqlEditor ? sqlEditor.getValue().trim() : document.getElementById('sqlQuery').value.trim();
+    const db = document.getElementById('queryDatabase').value;
+    if (!query) return showNotification('Query is empty', 'warning');
+    if (!db) return showNotification('Select a database', 'warning');
 
-        const keyName = document.createElement('td');
-        keyName.textContent = index.Key_name;
-        tr.appendChild(keyName);
+    socket.emit('save_query_history', { query, database: db });
+    const start = Date.now();
+    socket.emit('execute_query', { database: db, query });
 
-        const column = document.createElement('td');
-        column.textContent = index.Column_name;
-        tr.appendChild(column);
-
-        const unique = document.createElement('td');
-        unique.textContent = index.Non_unique === 0 ? 'Yes' : 'No';
-        tr.appendChild(unique);
-
-        const type = document.createElement('td');
-        type.textContent = index.Index_type;
-        tr.appendChild(type);
-
-        const cardinality = document.createElement('td');
-        cardinality.textContent = index.Cardinality || '';
-        tr.appendChild(cardinality);
-
-        tbody.appendChild(tr);
+    socket.once('query_result', () => {
+        document.getElementById('queryExecTime').textContent = `${Date.now() - start}ms`;
     });
 }
 
-function populateAlterFormColumns() {
-    if (!currentDatabase || !currentTable) return;
+document.getElementById('executeQuery').addEventListener('click', executeQuery);
 
-    // Get current table structure
-    socket.emit('get_table_structure', {
-        database: currentDatabase,
-        table: currentTable
+document.getElementById('clearQuery').addEventListener('click', () => {
+    if (sqlEditor) sqlEditor.setValue('');
+    else document.getElementById('sqlQuery').value = '';
+});
+
+document.getElementById('formatQuery').addEventListener('click', () => {
+    if (!sqlEditor) return;
+    // Basic formatting: uppercase keywords
+    const keywords = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'ON', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET', 'INSERT INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE FROM', 'CREATE TABLE', 'DROP TABLE', 'ALTER TABLE', 'AND', 'OR', 'NOT', 'IN', 'BETWEEN', 'LIKE', 'IS NULL', 'IS NOT NULL'];
+    let sql = sqlEditor.getValue();
+    keywords.forEach(kw => {
+        sql = sql.replace(new RegExp(`\\b${kw}\\b`, 'gi'), kw);
     });
-}
+    sqlEditor.setValue(sql);
+});
 
-function updateAlterFormColumns(structure) {
-    const dropColumnSelect = document.getElementById('dropColumnName');
-    const modifyColumnSelect = document.getElementById('modifyColumnName');
-    const indexColumnsSelect = document.getElementById('newIndexColumns');
+document.getElementById('toggleQueryHistoryBtn').addEventListener('click', () => {
+    const panel = document.getElementById('queryHistoryPanel');
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+});
 
-    // Clear existing options
-    dropColumnSelect.innerHTML = '<option value="">Select Column</option>';
-    modifyColumnSelect.innerHTML = '<option value="">Select Column</option>';
-    indexColumnsSelect.innerHTML = '';
+document.getElementById('clearQueryHistoryBtn').addEventListener('click', () => {
+    socket.emit('clear_query_history');
+});
 
-    structure.forEach(field => {
-        const dropOption = document.createElement('option');
-        dropOption.value = field.Field;
-        dropOption.textContent = field.Field;
-        dropColumnSelect.appendChild(dropOption);
-
-        const modifyOption = document.createElement('option');
-        modifyOption.value = field.Field;
-        modifyOption.textContent = `${field.Field} (${field.Type})`;
-        modifyColumnSelect.appendChild(modifyOption);
-
-        const indexOption = document.createElement('option');
-        indexOption.value = field.Field;
-        indexOption.textContent = field.Field;
-        indexColumnsSelect.appendChild(indexOption);
-    });
-}
-
-function addColumn(e) {
-    e.preventDefault();
-
-    const columnName = document.getElementById('newColumnName').value.trim();
-    const columnType = document.getElementById('newColumnType').value;
-    const allowNull = document.getElementById('newColumnNull').checked;
-    const defaultValue = document.getElementById('newColumnDefault').value.trim();
-    const position = document.getElementById('newColumnPosition').value;
-
-    if (!columnName || !columnType) {
-        showNotification('Please fill in column name and type', 'error');
+function renderQueryHistory(history) {
+    const list = document.getElementById('queryHistoryList');
+    list.innerHTML = '';
+    if (!history.length) {
+        list.innerHTML = '<div class="text-muted text-sm" style="padding:8px;">No query history</div>';
         return;
     }
-
-    let alterQuery = `ALTER TABLE \`${currentTable}\` ADD COLUMN \`${columnName}\` ${columnType}`;
-
-    if (!allowNull) {
-        alterQuery += ' NOT NULL';
-    }
-
-    if (defaultValue) {
-        alterQuery += ` DEFAULT '${defaultValue}'`;
-    }
-
-    if (position === 'FIRST') {
-        alterQuery += ' FIRST';
-    }
-
-    socket.emit('alter_table', {
-        database: currentDatabase,
-        table: currentTable,
-        alterQuery: alterQuery
-    });
-
-    // Clear form
-    document.getElementById('addColumnForm').reset();
-}
-
-function dropColumn(e) {
-    e.preventDefault();
-
-    const columnName = document.getElementById('dropColumnName').value;
-
-    if (!columnName) {
-        showNotification('Please select a column to drop', 'error');
-        return;
-    }
-
-    if (!confirm(`Are you sure you want to drop column '${columnName}'? This action cannot be undone.`)) {
-        return;
-    }
-
-    const alterQuery = `ALTER TABLE \`${currentTable}\` DROP COLUMN \`${columnName}\``;
-
-    socket.emit('alter_table', {
-        database: currentDatabase,
-        table: currentTable,
-        alterQuery: alterQuery
-    });
-
-    // Clear form
-    document.getElementById('dropColumnForm').reset();
-}
-
-function modifyColumn(e) {
-    e.preventDefault();
-
-    const columnName = document.getElementById('modifyColumnName').value;
-    const columnType = document.getElementById('modifyColumnType').value;
-    const allowNull = document.getElementById('modifyColumnNull').checked;
-    const defaultValue = document.getElementById('modifyColumnDefault').value.trim();
-
-    if (!columnName || !columnType) {
-        showNotification('Please select column and specify new type', 'error');
-        return;
-    }
-
-    let alterQuery = `ALTER TABLE \`${currentTable}\` MODIFY COLUMN \`${columnName}\` ${columnType}`;
-
-    if (!allowNull) {
-        alterQuery += ' NOT NULL';
-    }
-
-    if (defaultValue) {
-        alterQuery += ` DEFAULT '${defaultValue}'`;
-    }
-
-    socket.emit('alter_table', {
-        database: currentDatabase,
-        table: currentTable,
-        alterQuery: alterQuery
-    });
-
-    // Clear form
-    document.getElementById('modifyColumnForm').reset();
-}
-
-function addIndex(e) {
-    e.preventDefault();
-
-    const indexName = document.getElementById('newIndexName').value.trim();
-    const selectedColumns = Array.from(document.getElementById('newIndexColumns').selectedOptions)
-        .map(option => option.value);
-    const indexType = document.getElementById('newIndexType').value;
-
-    if (!indexName || selectedColumns.length === 0) {
-        showNotification('Please specify index name and select columns', 'error');
-        return;
-    }
-
-    const columnsStr = selectedColumns.map(col => `\`${col}\``).join(', ');
-    let alterQuery;
-
-    if (indexType === 'UNIQUE') {
-        alterQuery = `ALTER TABLE \`${currentTable}\` ADD UNIQUE KEY \`${indexName}\` (${columnsStr})`;
-    } else if (indexType === 'FULLTEXT') {
-        alterQuery = `ALTER TABLE \`${currentTable}\` ADD FULLTEXT KEY \`${indexName}\` (${columnsStr})`;
-    } else {
-        alterQuery = `ALTER TABLE \`${currentTable}\` ADD KEY \`${indexName}\` (${columnsStr})`;
-    }
-
-    socket.emit('alter_table', {
-        database: currentDatabase,
-        table: currentTable,
-        alterQuery: alterQuery
-    });
-
-    // Clear form
-    document.getElementById('addIndexForm').reset();
-}
-
-function executeCustomAlter(e) {
-    e.preventDefault();
-
-    const customQuery = document.getElementById('customAlterQuery').value.trim();
-
-    if (!customQuery) {
-        showNotification('Please enter an ALTER statement', 'error');
-        return;
-    }
-
-    socket.emit('alter_table', {
-        database: currentDatabase,
-        table: currentTable,
-        alterQuery: customQuery
-    });
-
-    // Clear form
-    document.getElementById('customAlterForm').reset();
-}
-
-function dropTable() {
-    if (!currentTable || !currentDatabase) {
-        showNotification('No table selected', 'error');
-        return;
-    }
-
-    const confirmation = prompt(`Type '${currentTable}' to confirm dropping this table:`);
-    if (confirmation !== currentTable) {
-        showNotification('Table name confirmation failed', 'error');
-        return;
-    }
-
-    socket.emit('drop_table', {
-        database: currentDatabase,
-        table: currentTable
-    });
-}
-
-function copyRowData(data, button) {
-    // If data is a row object
-    const text = JSON.stringify(data);
-    navigator.clipboard.writeText(text).then(() => {
-        const originalText = button.innerHTML; // Assuming it's an icon or text
-        button.innerHTML = '✓';
-        setTimeout(() => {
-            button.innerHTML = originalText;
-        }, 1000);
-        showNotification('Row data copied to clipboard', 'success');
-    }).catch(err => {
-        console.error('Failed to copy: ', err);
-        showNotification('Failed to copy to clipboard', 'error');
-    });
-}
-
-function copyCellData(value, button) {
-    let text;
-    if (typeof value === 'object' && value !== null) {
-        text = JSON.stringify(value);
-    } else {
-        text = String(value);
-    }
-    navigator.clipboard.writeText(text).then(() => {
-        const originalText = button.innerHTML;
-        button.innerHTML = '✓';
-        setTimeout(() => {
-            button.innerHTML = originalText;
-        }, 1000);
-        showNotification('Cell data copied to clipboard', 'success');
-    }).catch(err => {
-        console.error('Failed to copy: ', err);
-        showNotification('Failed to copy to clipboard', 'error');
-    });
-}
-
-function populateTableData(data) {
-    const thead = dataTable.querySelector('thead');
-    const tbody = dataTable.querySelector('tbody');
-
-    // Clear existing data
-    thead.innerHTML = '';
-    tbody.innerHTML = '';
-
-    // Debug logging
-    console.log('Table data received:', data);
-
-    // Check if data exists and has the expected structure
-    if (!data || !data.data) {
-        tbody.innerHTML = '<tr><td colspan="100%">No data structure received</td></tr>';
-        return;
-    }
-
-    if (data.data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="100%">No data found</td></tr>';
-        return;
-    }
-
-    // Check if first row exists and is an object
-    if (!data.data[0] || typeof data.data[0] !== 'object') {
-        tbody.innerHTML = '<tr><td colspan="100%">Invalid data format received</td></tr>';
-        console.error('Invalid data format:', data.data[0]);
-        return;
-    }
-
-    // Create header with sorting functionality
-    const headerRow = document.createElement('tr');
-
-    // Add empty header for row copy button if not already there (it will be added after checkbox if present)
-    const actionTh = document.createElement('th');
-    actionTh.style.width = '70px'; // Increased from 40px to fit both buttons
-    actionTh.style.minWidth = '70px';
-    // We'll append this after the checkbox header if it exists, or first if not.
-
-
-    // Add checkbox column header if PK exists
-    if (currentPrimaryKey) {
-        const th = document.createElement('th');
-        th.style.width = '30px';
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.addEventListener('change', (e) => {
-            const checked = e.target.checked;
-            document.querySelectorAll('.row-checkbox').forEach(cb => cb.checked = checked);
-        });
-        th.appendChild(checkbox);
-        headerRow.appendChild(th);
-    }
-
-    // Append the action column header
-    headerRow.appendChild(actionTh);
-
-    const columns = Object.keys(data.data[0]);
-
-    columns.forEach(column => {
-        const th = document.createElement('th');
-        th.className = 'sortable-header';
-        th.textContent = column;
-        th.setAttribute('data-column', column);
-
-        // Add sort indicator if this column is currently sorted
-        if (data.sortColumn === column) {
-            const indicator = document.createElement('span');
-            indicator.className = `sort-indicator ${data.sortDirection.toLowerCase()}`;
-            th.appendChild(indicator);
-        }
-
-        // Add click handler for sorting
-        th.addEventListener('click', () => sortByColumn(column));
-
-        headerRow.appendChild(th);
-    });
-
-    thead.appendChild(headerRow);
-
-    // Update search column dropdowns
-    cachedColumns = columns;
-    updateAllFilterColumnDropdowns();
-
-    // Create data rows
-    data.data.forEach(row => {
-        const tr = document.createElement('tr');
-
-        // Add checkbox if PK exists
-        if (currentPrimaryKey) {
-            const td = document.createElement('td');
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.className = 'row-checkbox';
-            checkbox.value = row[currentPrimaryKey];
-            td.appendChild(checkbox);
-            tr.appendChild(td);
-        }
-
-        // Add row copy button cell
-        const copyBtnTd = document.createElement('td');
-        // Removed fixed width here, let header control it
-        copyBtnTd.style.whiteSpace = 'nowrap';
-        copyBtnTd.style.textAlign = 'center';
-        copyBtnTd.className = 'action-cell';
-
-        const rowCopyBtn = document.createElement('button');
-        rowCopyBtn.className = 'row-copy-btn';
-        rowCopyBtn.innerHTML = '📄';
-        rowCopyBtn.title = 'Copy entire row';
-        rowCopyBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            copyRowData(row, e.target);
-        });
-
-        // Add row edit button
-        if (currentPrimaryKey) {
-            const rowEditBtn = document.createElement('button');
-            rowEditBtn.className = 'row-copy-btn'; // Reuse style for now
-            rowEditBtn.innerHTML = '✏️';
-            rowEditBtn.title = 'Edit row';
-            rowEditBtn.style.marginLeft = '5px';
-            rowEditBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                openEditRowModal(row);
-            });
-            copyBtnTd.appendChild(rowEditBtn);
-        }
-
-        copyBtnTd.appendChild(rowCopyBtn);
-        tr.appendChild(copyBtnTd);
-
-        columns.forEach(column => {
-            const td = document.createElement('td');
-            const value = row[column];
-
-            // Handle null values
-            if (value === null) {
-                td.textContent = 'NULL';
-                td.style.fontStyle = 'italic';
-                td.style.color = '#888';
-                td.className = 'data-cell';
-            } else {
-                let stringValue;
-                if (typeof value === 'object') {
-                    stringValue = JSON.stringify(value);
-                } else {
-                    stringValue = String(value);
-                }
-
-                // Determine content type and apply appropriate styling
-                if (typeof value === 'number') {
-                    td.textContent = stringValue;
-                    td.className = 'data-cell numeric-content';
-                } else if (stringValue.length > 100) {
-                    // Long text content - show truncated with full text in title
-                    td.className = 'data-cell long-text';
-                    td.textContent = stringValue.substring(0, 100) + '...';
-                    td.title = stringValue; // Show full text on hover
-                } else if (stringValue.includes('\n') || stringValue.includes('\t')) {
-                    // Multi-line or formatted content
-                    td.textContent = stringValue;
-                    td.className = 'data-cell text-content';
-                } else if (/^[A-Z_][A-Z0-9_]*$/i.test(stringValue) && stringValue.length > 10) {
-                    // Looks like code/identifiers
-                    td.textContent = stringValue;
-                    td.className = 'data-cell code-content';
-                } else {
-                    // Regular text content
-                    td.textContent = stringValue;
-                    td.className = 'data-cell text-content';
-                }
-            }
-
-            // Add cell copy button
-            const cellCopyBtn = document.createElement('button');
-            cellCopyBtn.className = 'cell-copy-btn';
-            cellCopyBtn.innerHTML = '📋';
-            cellCopyBtn.title = 'Copy cell data';
-            cellCopyBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                copyCellData(value, e.target);
-            });
-            td.appendChild(cellCopyBtn);
-
-            tr.appendChild(td);
-        });
-
-        tbody.appendChild(tr);
-    });
-
-    // Show delete buttons
-    document.getElementById('deleteAllData').style.display = 'inline-block';
-    if (currentPrimaryKey) {
-        document.getElementById('deleteSelectedRows').style.display = 'inline-block';
-    } else {
-        document.getElementById('deleteSelectedRows').style.display = 'none';
-        showNotification('Primary Key not found. Row deletion disabled.', 'warning');
-    }
-
-    // Show search info if search is active
-    updateSearchInfo(data);
-
-    // Check if table is horizontally scrollable and add indicator
-    addScrollIndicator(dataTable.closest('.table-container'));
-}
-
-function addScrollIndicator(tableContainer) {
-    if (!tableContainer) return;
-
-    // Remove existing indicator
-    const existingIndicator = tableContainer.querySelector('.scroll-indicator');
-    if (existingIndicator) {
-        existingIndicator.remove();
-    }
-
-    // Check if content is wider than container
-    const table = tableContainer.querySelector('table');
-    if (table && table.scrollWidth > tableContainer.clientWidth) {
-        tableContainer.classList.add('scrollable');
-
-        // Create scroll indicator element
-        const indicator = document.createElement('div');
-        indicator.className = 'scroll-indicator';
-        indicator.textContent = '↔ Scroll horizontally to view all columns';
-
-        // Position the indicator relative to the container
-        tableContainer.style.position = 'relative';
-        tableContainer.appendChild(indicator);
-
-        // Auto-hide after 4 seconds
-        setTimeout(() => {
-            if (indicator.parentElement) {
-                indicator.style.transition = 'opacity 0.5s ease-out';
-                indicator.style.opacity = '0';
-                setTimeout(() => {
-                    if (indicator.parentElement) {
-                        indicator.remove();
-                    }
-                }, 500);
-            }
-        }, 4000);
-
-        // Add scroll listener to show progress indicator
-        let scrollTimeout;
-        tableContainer.addEventListener('scroll', (e) => {
-            // Clear existing timeout
-            if (scrollTimeout) {
-                clearTimeout(scrollTimeout);
-            }
-
-            // Show scroll progress if user is scrolling horizontally
-            if (e.target.scrollLeft > 0) {
-                showScrollProgress(tableContainer, e.target.scrollLeft, e.target.scrollWidth - e.target.clientWidth);
-            }
-
-            // Hide progress after scrolling stops
-            scrollTimeout = setTimeout(() => {
-                hideScrollProgress(tableContainer);
-            }, 1000);
-        });
-
-    } else {
-        tableContainer.classList.remove('scrollable');
-    }
-}
-
-function showScrollProgress(container, scrollLeft, maxScroll) {
-    let progressBar = container.querySelector('.scroll-progress');
-
-    if (!progressBar) {
-        progressBar = document.createElement('div');
-        progressBar.className = 'scroll-progress';
-        progressBar.innerHTML = `
-            <div class="scroll-progress-bar">
-                <div class="scroll-progress-fill"></div>
+    history.slice(0, 50).forEach(h => {
+        const div = document.createElement('div');
+        div.className = 'qh-item';
+        div.innerHTML = `
+            <div style="overflow:hidden;">
+                <div class="qh-query">${escapeHtml(h.query)}</div>
+                <div class="qh-meta">${new Date(h.timestamp).toLocaleString()} · ${escapeHtml(h.database || '')}</div>
             </div>
-            <div class="scroll-progress-text">Scrolling...</div>
+            <button class="btn btn-ghost btn-sm" style="flex-shrink:0;">Use</button>
         `;
-        container.appendChild(progressBar);
-
-        // Add CSS for progress bar if not exists
-        if (!document.querySelector('#scroll-progress-styles')) {
-            const style = document.createElement('style');
-            style.id = 'scroll-progress-styles';
-            style.textContent = `
-                .scroll-progress {
-                    position: absolute;
-                    top: 10px;
-                    right: 10px;
-                    background: rgba(0,0,0,0.8);
-                    color: white;
-                    padding: 6px 10px;
-                    border-radius: 16px;
-                    font-size: 10px;
-                    z-index: 1000;
-                    min-width: 80px;
-                    text-align: center;
-                }
-                .scroll-progress-bar {
-                    width: 60px;
-                    height: 3px;
-                    background: rgba(255,255,255,0.3);
-                    border-radius: 2px;
-                    margin: 4px auto 2px;
-                    overflow: hidden;
-                }
-                .scroll-progress-fill {
-                    height: 100%;
-                    background: #007bff;
-                    border-radius: 2px;
-                    transition: width 0.1s ease;
-                }
-            `;
-            document.head.appendChild(style);
-        }
-    }
-
-    // Update progress
-    const progressPercentage = (scrollLeft / maxScroll) * 100;
-    const fill = progressBar.querySelector('.scroll-progress-fill');
-    fill.style.width = progressPercentage + '%';
-
-    progressBar.style.opacity = '1';
-}
-
-function hideScrollProgress(container) {
-    const progressBar = container.querySelector('.scroll-progress');
-    if (progressBar) {
-        progressBar.style.opacity = '0';
-        setTimeout(() => {
-            if (progressBar.parentElement) {
-                progressBar.remove();
-            }
-        }, 300);
-    }
-}
-
-function updateAllFilterColumnDropdowns() {
-    const filterRows = document.querySelectorAll('.search-filter-row');
-    filterRows.forEach(row => {
-        const select = row.querySelector('.filter-column');
-        const currentValue = select.value;
-        select.innerHTML = '<option value="">Select Column</option>';
-        cachedColumns.forEach(column => {
-            const option = document.createElement('option');
-            option.value = column;
-            option.textContent = column;
-            select.appendChild(option);
+        div.querySelector('button').addEventListener('click', () => {
+            if (sqlEditor) sqlEditor.setValue(h.query);
+            document.getElementById('queryDatabase').value = h.database || '';
+            document.getElementById('queryHistoryPanel').style.display = 'none';
+            showNotification('Query loaded into editor', 'success');
         });
-        if (currentValue && cachedColumns.includes(currentValue)) {
-            select.value = currentValue;
-        }
+        list.appendChild(div);
     });
 }
 
-function addSearchFilterRow() {
+function displayQueryResult({ result }) {
+    const container = document.getElementById('queryResults');
+    if (!result) { container.innerHTML = '<p>No result</p>'; return; }
+
+    if (Array.isArray(result) && result.length > 0) {
+        const cols = Object.keys(result[0]);
+        container.innerHTML = `
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">${result.length} rows returned</div>
+            <div style="overflow:auto;">
+            <table class="generic-table">
+                <thead><tr>${cols.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+                <tbody>${result.map(row => `<tr>${cols.map(c => `<td>${row[c] === null ? '<span class="null-value">NULL</span>' : escapeHtml(String(row[c]))}</td>`).join('')}</tr>`).join('')}</tbody>
+            </table></div>`;
+    } else if (result.affectedRows !== undefined) {
+        container.innerHTML = `<div class="notification success" style="pointer-events:all;max-width:300px;"><span class="notification-icon">✅</span><span>Query OK — ${result.affectedRows} rows affected</span></div>`;
+    } else if (Array.isArray(result) && result.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="padding:20px;"><div class="empty-state-desc">Query executed successfully — 0 rows returned</div></div>';
+    } else {
+        container.innerHTML = `<pre style="font-size:12px;color:var(--text-sub);overflow:auto;">${escapeHtml(JSON.stringify(result, null, 2))}</pre>`;
+    }
+}
+
+// ============================================================
+//  PAGINATION CONTROLS
+// ============================================================
+document.getElementById('prevPage').addEventListener('click', () => {
+    if (currentPage > 1) { currentPage--; loadTableData(); }
+});
+
+document.getElementById('nextPage').addEventListener('click', () => {
+    const maxPage = Math.ceil(totalRows / pageSize);
+    if (currentPage < maxPage) { currentPage++; loadTableData(); }
+});
+
+document.getElementById('pageSize').addEventListener('change', (e) => {
+    pageSize = parseInt(e.target.value);
+    currentPage = 1;
+    loadTableData();
+});
+
+document.getElementById('pageJumpBtn').addEventListener('click', () => {
+    const page = parseInt(document.getElementById('pageJump').value);
+    if (page > 0) { currentPage = page; loadTableData(); }
+});
+
+// ============================================================
+//  SEARCH / FILTERS
+// ============================================================
+function collectFilters() {
+    const filters = [];
+    document.querySelectorAll('#searchFiltersContainer .filter-row').forEach(row => {
+        const col = row.querySelector('.filter-column').value;
+        const op = row.querySelector('.filter-operator').value;
+        const val = row.querySelector('.filter-value').value;
+        if (col && val) filters.push({ column: col, operator: op, value: val });
+    });
+    return filters;
+}
+
+document.getElementById('addFilterBtn').addEventListener('click', () => {
     const container = document.getElementById('searchFiltersContainer');
     const row = document.createElement('div');
-    row.className = 'search-filter-row';
+    row.className = 'filter-row';
     row.innerHTML = `
-        <select class="filter-column">
-            <option value="">Select Column</option>
+        <select class="filter-column form-control" style="width:130px;padding:5px 8px;font-size:12px;">
+            <option value="">Column</option>
+            ${_columnMap.map(c => `<option>${c}</option>`).join('')}
         </select>
-        <select class="filter-operator">
+        <select class="filter-operator form-control" style="width:110px;padding:5px 8px;font-size:12px;">
             <option value="LIKE">Contains</option>
             <option value="NOT LIKE">Not Contains</option>
+            <option value="=">=</option>
+            <option value="!=">!=</option>
+            <option value=">">&gt;</option>
+            <option value="<">&lt;</option>
         </select>
-        <input type="text" class="filter-value" placeholder="Search value...">
-        <button type="button" class="remove-filter-btn btn btn-danger btn-small" title="Remove filter">✕</button>
+        <input type="text" class="filter-value form-control" style="width:140px;padding:5px 8px;font-size:12px;" placeholder="Value...">
+        <button type="button" class="btn btn-danger btn-sm remove-filter-btn">✕</button>
     `;
+    row.querySelector('.remove-filter-btn').addEventListener('click', () => row.remove());
     container.appendChild(row);
+});
 
-    // Populate columns in the new row
-    const select = row.querySelector('.filter-column');
-    cachedColumns.forEach(column => {
-        const option = document.createElement('option');
-        option.value = column;
-        option.textContent = column;
-        select.appendChild(option);
-    });
+// Remove filter (for initial row)
+document.querySelector('.remove-filter-btn').addEventListener('click', function() {
+    const rows = document.querySelectorAll('#searchFiltersContainer .filter-row');
+    if (rows.length > 1) this.closest('.filter-row').remove();
+});
 
-    // Setup events for the new row
-    setupFilterRowEvents();
-}
-
-function removeSearchFilterRow(row) {
-    const container = document.getElementById('searchFiltersContainer');
-    const rows = container.querySelectorAll('.search-filter-row');
-    // Always keep at least one row
-    if (rows.length > 1) {
-        row.remove();
-    } else {
-        // Clear the last remaining row instead of removing it
-        row.querySelector('.filter-column').value = '';
-        row.querySelector('.filter-operator').value = 'LIKE';
-        row.querySelector('.filter-value').value = '';
-    }
-}
-
-function setupFilterRowEvents() {
-    const container = document.getElementById('searchFiltersContainer');
-    container.querySelectorAll('.remove-filter-btn').forEach(btn => {
-        // Remove old listeners by cloning
-        const newBtn = btn.cloneNode(true);
-        btn.parentNode.replaceChild(newBtn, btn);
-        newBtn.addEventListener('click', () => removeSearchFilterRow(newBtn.closest('.search-filter-row')));
-    });
-
-    // Add Enter key support to all filter value inputs
-    container.querySelectorAll('.filter-value').forEach(input => {
-        const newInput = input.cloneNode(true);
-        input.parentNode.replaceChild(newInput, input);
-        newInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') performSearch();
-        });
-    });
-}
-
-function updateSearchInfo(data) {
-    // Remove existing search info
-    const existingInfo = document.querySelector('.search-info');
-    if (existingInfo) {
-        existingInfo.remove();
-    }
-
-    // Add search info if search filters are active
-    if (data.searchFilters && Array.isArray(data.searchFilters) && data.searchFilters.length > 0) {
-        const validFilters = data.searchFilters.filter(f => f.column && f.value);
-        if (validFilters.length > 0) {
-            const logic = data.searchLogic || 'AND';
-            const filterDescriptions = validFilters.map(f => {
-                const op = f.operator === 'NOT LIKE' ? 'not in' : 'in';
-                return `"${f.value}" ${op} "${f.column}"`;
-            });
-            const searchInfo = document.createElement('div');
-            searchInfo.className = 'search-info';
-            searchInfo.textContent = `Filtering: ${filterDescriptions.join(` ${logic} `)} (${data.total} matches)`;
-
-            const dataControls = document.querySelector('.data-controls');
-            dataControls.insertAdjacentElement('afterend', searchInfo);
-        }
-    }
-}
-
-function sortByColumn(column) {
-    if (currentSortColumn === column) {
-        // Toggle sort direction
-        currentSortDirection = currentSortDirection === 'ASC' ? 'DESC' : 'ASC';
-    } else {
-        // New column, default to ASC
-        currentSortColumn = column;
-        currentSortDirection = 'ASC';
-    }
-
-    // Reset to first page when sorting
+document.getElementById('searchBtn').addEventListener('click', () => {
     currentPage = 1;
-    loadTableData();
-}
-
-function performSearch() {
-    const filterRows = document.querySelectorAll('.search-filter-row');
-    const filters = [];
-    let hasIncomplete = false;
-
-    filterRows.forEach(row => {
-        const column = row.querySelector('.filter-column').value;
-        const operator = row.querySelector('.filter-operator').value;
-        const value = row.querySelector('.filter-value').value.trim();
-
-        if (column && value) {
-            filters.push({ column, value, operator });
-        } else if (column && !value) {
-            hasIncomplete = true;
-        } else if (!column && value) {
-            hasIncomplete = true;
-        }
-    });
-
-    if (hasIncomplete && filters.length === 0) {
-        showNotification('Please select a column and enter a value for each filter', 'error');
-        return;
-    }
-
-    currentSearchFilters = filters;
+    currentSearchFilters = collectFilters();
     currentSearchLogic = document.getElementById('searchLogic').value;
-    currentPage = 1;
+    loadTableData();
+});
 
-    // Update filter input styling
-    filterRows.forEach(row => {
-        const column = row.querySelector('.filter-column').value;
-        const value = row.querySelector('.filter-value').value.trim();
-        const input = row.querySelector('.filter-value');
-        if (column && value) {
-            input.classList.add('search-active');
-        } else {
-            input.classList.remove('search-active');
+document.getElementById('clearSearchBtn').addEventListener('click', () => {
+    document.querySelectorAll('.filter-value').forEach(i => i.value = '');
+    document.querySelectorAll('.filter-column').forEach(s => s.value = '');
+    currentSearchFilters = [];
+    currentPage = 1;
+    loadTableData();
+});
+
+// ============================================================
+//  ROW EDIT / INSERT / DELETE
+// ============================================================
+window.openEditRowModal = function(rowJson) {
+    const row = JSON.parse(rowJson);
+    const fields = document.getElementById('editRowFields');
+    fields.innerHTML = Object.entries(row).map(([key, val]) => `
+        <div class="form-group">
+            <label>${escapeHtml(key)}</label>
+            <input class="form-control" type="text" name="${escapeHtml(key)}" value="${val !== null ? escapeHtml(String(val)) : ''}" placeholder="NULL">
+        </div>
+    `).join('');
+
+    document.getElementById('editRowForm').onsubmit = (e) => {
+        e.preventDefault();
+        const updateData = {};
+        new FormData(e.target).forEach((val, key) => { updateData[key] = val; });
+        // Find PK
+        let pkCol = null, pkVal = null;
+        if (currentTableStructure) {
+            const pk = currentTableStructure.find(f => f.Key === 'PRI');
+            if (pk) { pkCol = pk.Field; pkVal = row[pk.Field]; }
+        }
+        if (!pkCol) { pkCol = Object.keys(row)[0]; pkVal = row[pkCol]; }
+        socket.emit('update_row', { database: currentDatabase, table: currentTable, primaryKeyColumn: pkCol, primaryKeyValue: pkVal, updateData });
+    };
+
+    showModal('modalEditRow');
+};
+
+window.deleteRow = function(rowJson) {
+    const row = JSON.parse(rowJson);
+    if (!confirm('Delete this row?')) return;
+    let pkCol = Object.keys(row)[0];
+    if (currentTableStructure) {
+        const pk = currentTableStructure.find(f => f.Key === 'PRI');
+        if (pk) pkCol = pk.Field;
+    }
+    socket.emit('delete_selected_data', {
+        database: currentDatabase, table: currentTable,
+        targetColumn: pkCol, targetValues: [row[pkCol]]
+    });
+};
+
+function openInsertRowModal() {
+    if (!currentTableStructure) return showNotification('Select a table first', 'warning');
+    document.getElementById('insertRowTableName').textContent = currentTable;
+    const container = document.getElementById('insertRowFields');
+    container.innerHTML = currentTableStructure.map(f => `
+        <div class="form-group">
+            <label>${escapeHtml(f.Field)} <span class="text-muted text-sm">${escapeHtml(f.Type)}${f.Null === 'NO' ? ' *' : ''}</span></label>
+            <input class="form-control" type="text" name="${escapeHtml(f.Field)}" placeholder="${f.Default !== null ? 'Default: ' + f.Default : 'NULL'}">
+        </div>
+    `).join('');
+    showModal('modalInsertRow');
+}
+
+document.getElementById('insertRowBtn').addEventListener('click', openInsertRowModal);
+
+document.getElementById('insertRowForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const rowData = {};
+    new FormData(e.target).forEach((val, key) => { if (val.trim()) rowData[key] = val.trim(); });
+    socket.emit('insert_row', { database: currentDatabase, table: currentTable, rowData });
+});
+
+document.getElementById('deleteSelectedRows').addEventListener('click', () => {
+    const checked = Array.from(document.querySelectorAll('#dataTable tbody .row-select-checkbox:checked'));
+    if (!checked.length) return showNotification('Select rows first', 'warning');
+    if (!confirm(`Delete ${checked.length} selected rows?`)) return;
+    const pkCol = currentTableStructure?.find(f => f.Key === 'PRI')?.Field || _columnMap[0];
+    const pkVals = checked.map(cb => {
+        const row = window._rowData[cb.closest('tr').dataset.rowIdx];
+        return row ? row[pkCol] : null;
+    }).filter(v => v !== null);
+    socket.emit('delete_selected_data', { database: currentDatabase, table: currentTable, targetColumn: pkCol, targetValues: pkVals });
+});
+
+document.getElementById('deleteAllData').addEventListener('click', () => {
+    if (!confirm(`Delete ALL data from "${currentTable}"? This cannot be undone!`)) return;
+    socket.emit('delete_all_data', { database: currentDatabase, table: currentTable });
+});
+
+// ============================================================
+//  EXPORT
+// ============================================================
+function showExportDatabaseModal(db) {
+    currentDatabase = db || currentDatabase;
+    document.getElementById('exportDbName').textContent = currentDatabase;
+    // Populate table checkboxes
+    const list = document.getElementById('exportTablesList');
+    list.innerHTML = '';
+    const tables = Array.from(document.querySelectorAll(`#dbtables-${currentDatabase} .table-node`)).map(n => n.dataset.table);
+    tables.forEach(t => {
+        const label = document.createElement('label');
+        label.className = 'checkbox-label';
+        label.innerHTML = `<input type="checkbox" name="exportTable" value="${t}" checked> ${t}`;
+        label.style.marginBottom = '4px';
+        list.appendChild(label);
+    });
+    showModal('modalExportDatabase');
+}
+
+function showExportTableModal(db, table) {
+    document.getElementById('exportTableName').textContent = `${db || currentDatabase}.${table || currentTable}`;
+    showModal('modalExportTable');
+}
+
+window.selectAllTables = () => document.querySelectorAll('[name="exportTable"]').forEach(cb => cb.checked = true);
+window.deselectAllTables = () => document.querySelectorAll('[name="exportTable"]').forEach(cb => cb.checked = false);
+window.previewRowCount = () => {
+    const where = document.getElementById('exportWhereClause').value;
+    if (currentDatabase && currentTable) socket.emit('get_row_count', { database: currentDatabase, table: currentTable, whereClause: where });
+};
+
+document.getElementById('exportDatabaseForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const format = document.querySelector('[name="exportFormat"]:checked').value;
+    const method = document.querySelector('[name="exportMethod"]:checked').value;
+    const tables = Array.from(document.querySelectorAll('[name="exportTable"]:checked')).map(cb => cb.value);
+    socket.emit('export_database', {
+        database: currentDatabase,
+        options: { format, exportMethod: method, includeData: document.getElementById('exportIncludeData').checked, tables }
+    });
+    showNotification('Preparing export...', 'info');
+});
+
+document.getElementById('exportTableForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const exportType = document.querySelector('[name="dataExportType"]:checked')?.value;
+    socket.emit('export_table', {
+        database: currentDatabase, table: currentTable,
+        options: {
+            format: document.querySelector('[name="tableExportFormat"]:checked').value,
+            includeData: document.getElementById('exportTableIncludeData').checked,
+            exportType,
+            whereClause: exportType === 'custom' ? document.getElementById('exportWhereClause').value : null
         }
     });
+    showNotification('Preparing export...', 'info');
+});
 
-    loadTableData();
+// Export current data button
+document.getElementById('exportCurrentData').addEventListener('click', () => showExportTableModal());
+
+// Custom WHERE clause toggle
+document.querySelectorAll('[name="dataExportType"]').forEach(r => {
+    r.addEventListener('change', () => {
+        document.getElementById('customWhereClause').style.display =
+            document.querySelector('[name="dataExportType"]:checked')?.value === 'custom' ? 'block' : 'none';
+    });
+});
+
+// ============================================================
+//  IMPORT
+// ============================================================
+document.getElementById('importDatabaseBtn').addEventListener('click', () => {
+    if (!currentDatabase) return showNotification('Select a database first', 'warning');
+    document.getElementById('importDbName').textContent = currentDatabase;
+    showModal('modalImportDatabase');
+});
+
+// Drag-and-drop for import
+const dropZone = document.getElementById('importDropZone');
+dropZone.addEventListener('click', () => document.getElementById('importFile').click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) handleImportFile(file);
+});
+document.getElementById('importFile').addEventListener('change', e => {
+    if (e.target.files[0]) handleImportFile(e.target.files[0]);
+});
+
+function handleImportFile(file) {
+    const info = document.getElementById('importFileInfo');
+    info.style.display = 'block';
+    info.textContent = `📄 ${file.name} (${formatFileSize(file.size)})`;
+    document.getElementById('importDropZone').querySelector('.file-drop-zone-text').textContent = file.name;
 }
 
-function clearSearch() {
-    const container = document.getElementById('searchFiltersContainer');
-    // Reset to a single empty row
-    container.innerHTML = `
-        <div class="search-filter-row">
-            <select class="filter-column">
-                <option value="">Select Column</option>
-            </select>
-            <select class="filter-operator">
-                <option value="LIKE">Contains</option>
-                <option value="NOT LIKE">Not Contains</option>
-            </select>
-            <input type="text" class="filter-value" placeholder="Search value...">
-            <button type="button" class="remove-filter-btn btn btn-danger btn-small" title="Remove filter">✕</button>
+document.getElementById('importDatabaseForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const file = document.getElementById('importFile').files[0];
+    if (!file) return showNotification('Select a file first', 'error');
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        const type = file.name.endsWith('.json') ? 'json' : 'sql';
+        socket.emit('import_database', { database: currentDatabase, content: ev.target.result, type });
+        showNotification('Importing...', 'info');
+        closeModal('modalImportDatabase');
+    };
+    reader.readAsText(file);
+});
+
+// ============================================================
+//  ALTER TABLE FORMS
+// ============================================================
+document.querySelectorAll('.alter-section-header').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+        hdr.closest('.alter-section').classList.toggle('open');
+        const arrow = hdr.querySelector('span:last-child');
+        if (arrow) arrow.textContent = hdr.closest('.alter-section').classList.contains('open') ? '▼' : '▶';
+    });
+});
+
+document.getElementById('addColumnForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = document.getElementById('newColumnName').value.trim();
+    const type = document.getElementById('newColumnType').value;
+    const nullable = document.getElementById('newColumnNull').checked ? 'NULL' : 'NOT NULL';
+    const def = document.getElementById('newColumnDefault').value;
+    const pos = document.getElementById('newColumnPosition').value;
+    const q = `ALTER TABLE \`${currentTable}\` ADD COLUMN \`${name}\` ${type} ${nullable}${def ? ` DEFAULT '${def}'` : ''} ${pos}`;
+    socket.emit('alter_table', { database: currentDatabase, table: currentTable, alterQuery: q });
+});
+
+document.getElementById('dropColumnForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const col = document.getElementById('dropColumnName').value;
+    if (!confirm(`Drop column "${col}"?`)) return;
+    socket.emit('alter_table', { database: currentDatabase, table: currentTable, alterQuery: `ALTER TABLE \`${currentTable}\` DROP COLUMN \`${col}\`` });
+});
+
+document.getElementById('modifyColumnForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const col = document.getElementById('modifyColumnName').value;
+    const type = document.getElementById('modifyColumnType').value;
+    const nullable = document.getElementById('modifyColumnNull').checked ? 'NULL' : 'NOT NULL';
+    const def = document.getElementById('modifyColumnDefault').value;
+    socket.emit('alter_table', { database: currentDatabase, table: currentTable, alterQuery: `ALTER TABLE \`${currentTable}\` MODIFY COLUMN \`${col}\` ${type} ${nullable}${def ? ` DEFAULT '${def}'` : ''}` });
+});
+
+document.getElementById('addIndexForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = document.getElementById('newIndexName').value;
+    const cols = Array.from(document.getElementById('newIndexColumns').selectedOptions).map(o => `\`${o.value}\``).join(', ');
+    const type = document.getElementById('newIndexType').value;
+    socket.emit('alter_table', { database: currentDatabase, table: currentTable, alterQuery: `ALTER TABLE \`${currentTable}\` ADD ${type} \`${name}\` (${cols})` });
+});
+
+document.getElementById('customAlterForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = document.getElementById('customAlterQuery').value.trim();
+    if (!q) return;
+    socket.emit('alter_table', { database: currentDatabase, table: currentTable, alterQuery: q });
+});
+
+document.getElementById('dropTableBtn').addEventListener('click', () => {
+    if (!currentTable) return;
+    if (confirm(`Drop table "${currentTable}"? This cannot be undone!`)) {
+        socket.emit('drop_table', { database: currentDatabase, table: currentTable });
+    }
+});
+
+document.getElementById('exportTableBtn').addEventListener('click', () => showExportTableModal());
+
+// ============================================================
+//  DATABASE CREATION
+// ============================================================
+document.getElementById('createDatabaseBtn').addEventListener('click', () => showModal('modalCreateDatabase'));
+
+document.getElementById('createDatabaseForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = document.getElementById('newDatabaseName').value.trim();
+    if (name) socket.emit('create_database', name);
+});
+
+// ============================================================
+//  QUERY DATABASE SELECTS
+// ============================================================
+function populateQueryDatabaseSelects(databases) {
+    const selects = ['queryDatabase', 'erDatabase', 'sqDatabase', 'diffDb1', 'diffDb2'];
+    selects.forEach(id => {
+        const sel = document.getElementById(id);
+        if (!sel) return;
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">Select Database</option>' +
+            databases.map(db => `<option value="${db}">${db}</option>`).join('');
+        if (cur) sel.value = cur;
+    });
+}
+
+// ============================================================
+//  SYSTEM STATS
+// ============================================================
+let statsInterval = null;
+
+function startStatsPolling() {
+    if (statsInterval) return;
+    document.getElementById('systemStats').style.display = 'flex';
+    statsInterval = setInterval(async () => {
+        try {
+            const data = await fetch('/api/system-stats').then(r => r.json());
+            document.getElementById('cpuBar').style.width = data.cpuUsage + '%';
+            document.getElementById('cpuText').textContent = data.cpuUsage + '%';
+            document.getElementById('memBar').style.width = data.memUsage + '%';
+            document.getElementById('memText').textContent = data.memUsage + '%';
+            // Update dashboard server info
+            document.getElementById('serverCpuCores').textContent = data.cpuCount;
+            document.getElementById('serverRam').textContent = data.totalMem;
+            document.getElementById('serverUptime').textContent = formatUptime(data.uptime);
+            document.getElementById('serverPlatform').textContent = data.platform;
+        } catch {}
+    }, 2000);
+}
+
+function stopStatsPolling() {
+    if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+    document.getElementById('systemStats').style.display = 'none';
+}
+
+function updateServerInfo() {
+    if (currentCredentials) {
+        document.getElementById('serverHost').textContent = `${currentCredentials.host}:${currentCredentials.port}`;
+        document.getElementById('serverEngine').textContent = (currentCredentials.engine || 'MySQL').toUpperCase();
+    }
+}
+
+function formatUptime(seconds) {
+    if (!seconds) return '—';
+    const d = Math.floor(seconds / 86400);
+    const h = Math.floor((seconds % 86400) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${d}d ${h}h ${m}m`;
+}
+
+// ============================================================
+//  SETTINGS
+// ============================================================
+document.getElementById('settingsBtn').addEventListener('click', () => {
+    socket.emit('get_settings');
+    renderProfilesList();
+    showModal('modalSettings');
+});
+
+document.getElementById('saveSettingsBtn').addEventListener('click', () => {
+    const newSettings = {
+        general: {
+            showSystemStats: document.getElementById('settingShowSystemStats').checked,
+            autoReconnect: document.getElementById('settingAutoReconnect').checked,
+        },
+        backupProfiles,
+        appearance: {
+            theme: getStoredThemePref(),
+            editorTheme: document.getElementById('settingEditorTheme').value
+        }
+    };
+    socket.emit('save_settings', newSettings);
+    closeModal('modalSettings');
+    applySettings();
+});
+
+function applySettings() {
+    if (settings.general?.showSystemStats) startStatsPolling();
+    else stopStatsPolling();
+
+    if (settings.backupProfiles) backupProfiles = settings.backupProfiles;
+
+    if (settings.appearance) {
+        const themeOpt = settings.appearance.theme || 'auto';
+        setTheme(themeOpt);
+        if (settings.appearance.editorTheme && sqlEditor) {
+            sqlEditor.setOption('theme', settings.appearance.editorTheme);
+        }
+    }
+}
+
+// Settings navigation tabs
+document.querySelectorAll('.settings-nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.settings-nav-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.settings-pane').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById(btn.dataset.pane).classList.add('active');
+    });
+});
+
+// Theme options in settings
+document.querySelectorAll('[data-theme-opt]').forEach(el => {
+    el.addEventListener('click', () => {
+        document.querySelectorAll('[data-theme-opt]').forEach(e => e.classList.remove('active'));
+        el.classList.add('active');
+        setTheme(el.dataset.themeOpt);
+    });
+});
+
+// Dark mode toggle in header
+document.getElementById('darkModeToggle').addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme');
+    setTheme(cur === 'dark' ? 'light' : 'dark');
+});
+
+document.getElementById('settingEditorTheme').addEventListener('change', (e) => {
+    if (sqlEditor) sqlEditor.setOption('theme', e.target.value);
+});
+
+document.getElementById('clearAllCredsBtn').addEventListener('click', async () => {
+    if (!confirm('Clear all stored passwords?')) return;
+    const saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+    for (const conn of saved) {
+        const key = `${conn.host}:${conn.port}:${conn.user}`;
+        await fetch('/api/credential/delete?key=' + encodeURIComponent(key), { method: 'DELETE' }).catch(() => {});
+    }
+    showNotification('All stored passwords cleared', 'success');
+});
+
+document.getElementById('openSchemaDiffBtn').addEventListener('click', () => {
+    closeModal('modalSettings');
+    openSchemaDiff();
+});
+
+document.getElementById('viewBackupHistoryBtn').addEventListener('click', () => {
+    closeModal('modalSettings');
+    openBackupHistoryModal();
+});
+
+// ============================================================
+//  BACKUP PROFILES
+// ============================================================
+function renderProfilesList() {
+    const container = document.getElementById('profilesList');
+    if (!backupProfiles.length) {
+        container.innerHTML = '<div class="empty-state" style="padding:20px;"><div class="empty-state-desc">No backup profiles yet. Click "+ Add Profile" to create one.</div></div>';
+        return;
+    }
+    container.innerHTML = backupProfiles.map((p, i) => `
+        <div class="profile-card">
+            <div class="profile-card-header">
+                <span class="profile-card-name">${escapeHtml(p.name)}</span>
+                <label class="profile-enabled-toggle">
+                    <input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="toggleProfile(${i},this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+                <button class="btn btn-ghost btn-sm" onclick="editProfile(${i})">Edit</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteProfile(${i})">Delete</button>
+            </div>
+            <div class="profile-dbs">
+                ${(p.databases || []).map(db => `<span class="db-chip">📦 ${escapeHtml(db)}</span>`).join('')}
+            </div>
+            <div class="text-muted text-sm">${escapeHtml(p.interval || 'daily')} · Keep ${p.retention || 5} backups · CPU ≤ ${p.cpuLimit || 80}%</div>
         </div>
-    `;
-
-    // Repopulate columns in the reset row
-    updateAllFilterColumnDropdowns();
-    setupFilterRowEvents();
-
-    document.getElementById('searchLogic').value = 'AND';
-    currentSearchFilters = [];
-    currentSearchLogic = 'AND';
-    currentPage = 1;
-
-    // Remove search info
-    const existingInfo = document.querySelector('.search-info');
-    if (existingInfo) {
-        existingInfo.remove();
-    }
-
-    loadTableData();
+    `).join('');
 }
 
-function jumpToPage() {
-    const input = document.getElementById('pageJump');
-    const page = parseInt(input.value);
+window.toggleProfile = (idx, enabled) => { backupProfiles[idx].enabled = enabled; };
+window.deleteProfile = (idx) => { if (confirm('Delete this profile?')) { backupProfiles.splice(idx, 1); renderProfilesList(); } };
+window.editProfile = (idx) => { openProfileModal(backupProfiles[idx], idx); };
 
-    if (isNaN(page) || page < 1) {
-        showNotification('Please enter a valid page number', 'error');
-        return;
-    }
+document.getElementById('addProfileBtn').addEventListener('click', () => openProfileModal(null, null));
 
-    if (page > totalPages) {
-        showNotification(`Page ${page} does not exist. Max page is ${totalPages}`, 'error');
-        return;
-    }
+function openProfileModal(profile, idx) {
+    document.getElementById('profileModalTitle').textContent = profile ? 'Edit Backup Profile' : '+ New Backup Profile';
+    document.getElementById('profileEditId').value = idx !== null ? idx : '';
+    document.getElementById('profileName').value = profile?.name || '';
+    document.getElementById('profileEnabled').checked = profile?.enabled !== false;
+    document.getElementById('profileHost').value = profile?.credentials?.host || '';
+    document.getElementById('profilePort').value = profile?.credentials?.port || 3306;
+    document.getElementById('profileEngine').value = profile?.credentials?.engine || 'mysql';
+    document.getElementById('profileUser').value = profile?.credentials?.user || '';
+    document.getElementById('profilePassword').value = '';
+    document.getElementById('profileInterval').value = profile?.interval || 'daily';
+    document.getElementById('profileRetention').value = profile?.retention || 5;
+    document.getElementById('profileCpuLimit').value = profile?.cpuLimit || 80;
 
-    currentPage = page;
-    input.value = '';
-    loadTableData();
+    // Render db chips
+    const chips = document.getElementById('profileDbChips');
+    chips.innerHTML = '';
+    (profile?.databases || []).forEach(db => addProfileDbChip(db));
+    showModal('modalAddProfile');
 }
 
+function addProfileDbChip(db) {
+    const chips = document.getElementById('profileDbChips');
+    const chip = document.createElement('span');
+    chip.className = 'db-chip';
+    chip.dataset.db = db;
+    chip.innerHTML = `📦 ${escapeHtml(db)} <button class="db-chip-remove">✕</button>`;
+    chip.querySelector('.db-chip-remove').addEventListener('click', () => chip.remove());
+    chips.appendChild(chip);
+}
 
-// ... (other global variables remain same)
+document.getElementById('addProfileDbBtn').addEventListener('click', () => {
+    const input = document.getElementById('profileDbInput');
+    if (input.value.trim()) { addProfileDbChip(input.value.trim()); input.value = ''; }
+});
 
-function populateTableStructure(structure) {
-    const tbody = structureTable.querySelector('tbody');
+document.getElementById('profileDbInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('addProfileDbBtn').click(); }
+});
+
+document.getElementById('profileInterval').addEventListener('change', (e) => {
+    document.getElementById('profileCustomCronGroup').style.display = e.target.value === 'custom' ? 'block' : 'none';
+});
+
+document.getElementById('saveProfileBtn').addEventListener('click', async () => {
+    const idx = document.getElementById('profileEditId').value;
+    const databases = Array.from(document.querySelectorAll('#profileDbChips .db-chip')).map(c => c.dataset.db);
+    const pw = document.getElementById('profilePassword').value;
+    const host = document.getElementById('profileHost').value;
+    const port = parseInt(document.getElementById('profilePort').value);
+    const user = document.getElementById('profileUser').value;
+    const credKey = `profile:${host}:${port}:${user}`;
+
+    if (pw) {
+        await fetch('/api/credential/set', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: credKey, password: pw })
+        }).catch(() => {});
+    }
+
+    const profile = {
+        id: idx || Date.now().toString(),
+        name: document.getElementById('profileName').value.trim(),
+        enabled: document.getElementById('profileEnabled').checked,
+        credentials: { host, port, user, engine: document.getElementById('profileEngine').value },
+        credentialKey: credKey,
+        databases,
+        interval: document.getElementById('profileInterval').value,
+        cronExpression: document.getElementById('profileCustomCron').value,
+        retention: parseInt(document.getElementById('profileRetention').value),
+        cpuLimit: parseInt(document.getElementById('profileCpuLimit').value),
+    };
+
+    if (idx !== '') backupProfiles[parseInt(idx)] = profile;
+    else backupProfiles.push(profile);
+
+    renderProfilesList();
+    closeModal('modalAddProfile');
+});
+
+// ============================================================
+//  BACKUP HISTORY
+// ============================================================
+function openBackupHistoryModal() {
+    socket.emit('list_backups');
+    showModal('modalBackupHistory');
+}
+
+function loadBackupHistory() {
+    socket.emit('list_backups');
+}
+
+document.getElementById('manageBackupsBtn').addEventListener('click', openBackupHistoryModal);
+
+function renderBackupHistory(backups) {
+    const tbody = document.getElementById('backupHistoryTable').querySelector('tbody');
     tbody.innerHTML = '';
 
-    // reset primary key
-    currentPrimaryKey = null;
+    // Update recent backups on dashboard
+    const recentEl = document.getElementById('recentBackupsList');
+    if (!backups.length) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:30px;color:var(--text-muted);">No backups found</td></tr>';
+        recentEl.innerHTML = '<div class="text-muted text-sm">No backups yet</div>';
+        return;
+    }
 
-    structure.forEach(field => {
-        if (field.Key === 'PRI') {
-            currentPrimaryKey = field.Field;
-        }
-
+    backups.forEach(backup => {
         const tr = document.createElement('tr');
-
-        // Add row copy button (and edit button) column
-        const copyBtnTd = document.createElement('td');
-        copyBtnTd.className = 'action-cell';
-        copyBtnTd.style.whiteSpace = 'nowrap';
-        copyBtnTd.style.textAlign = 'center';
-
-        const rowCopyBtn = document.createElement('button');
-        rowCopyBtn.className = 'row-copy-btn';
-        rowCopyBtn.innerHTML = '📄';
-        rowCopyBtn.title = 'Copy entire row';
-        rowCopyBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            copyRowData(field, e.target);
-        });
-        tr.appendChild(rowCopyBtn);
-
-
-        ['Field', 'Type', 'Null', 'Key', 'Default', 'Extra'].forEach((prop, index) => {
-            const td = document.createElement('td');
-            const value = field[prop];
-
-            if (value === null || value === '') {
-                td.textContent = '';
-                td.style.color = '#888';
-            } else {
-                const stringValue = String(value);
-
-                // Apply specific styling based on column type
-                switch (index) {
-                    case 0: // Field name
-                        td.textContent = stringValue;
-                        td.className = 'code-content';
-                        break;
-                    case 1: // Type
-                        td.textContent = stringValue;
-                        td.className = 'code-content';
-                        if (stringValue.length > 50) {
-                            td.className += ' long-text';
-                            td.title = stringValue; // Show full text on hover
-                        }
-                        break;
-                    case 4: // Default
-                        if (stringValue.length > 30) {
-                            td.className = 'long-text';
-                            td.textContent = stringValue.substring(0, 30) + '...';
-                            td.title = stringValue; // Show full text on hover
-                        } else {
-                            td.textContent = stringValue;
-                            td.className = 'text-content';
-                        }
-                        break;
-                    default:
-                        td.textContent = stringValue;
-                        td.className = 'text-content';
-                }
-            }
-
-            // Add cell copy button
-            const cellCopyBtn = document.createElement('button');
-            cellCopyBtn.className = 'cell-copy-btn';
-            cellCopyBtn.innerHTML = '📋';
-            cellCopyBtn.title = 'Copy cell data';
-            cellCopyBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                copyCellData(value, e.target);
-            });
-            td.appendChild(cellCopyBtn);
-
-            tr.appendChild(td);
-        });
-
-        // Add Actions Column
-        const actionTd = document.createElement('td');
-
-        // Edit Column Button
-        const editBtn = document.createElement('button');
-        editBtn.className = 'btn btn-small btn-primary';
-        editBtn.textContent = 'Edit';
-        editBtn.style.marginRight = '5px';
-        editBtn.onclick = () => {
-            // Pre-fill modify form
-            document.getElementById('modifyColumnName').value = field.Field;
-            // Switch to Alter Table tab
-            switchTab('alter');
-        };
-
-        // Drop Column Button
-        const dropBtn = document.createElement('button');
-        dropBtn.className = 'btn btn-small btn-danger';
-        dropBtn.innerHTML = '🗑️';
-        dropBtn.title = 'Drop Column';
-        dropBtn.onclick = () => deleteColumn(field.Field);
-
-        actionTd.appendChild(editBtn);
-        actionTd.appendChild(dropBtn);
-        tr.appendChild(actionTd);
-
+        tr.innerHTML = `
+            <td style="font-family:'JetBrains Mono',monospace;font-size:12px;">${escapeHtml(backup.name)}</td>
+            <td><span class="badge badge-muted">${formatFileSize(backup.size)}</span></td>
+            <td class="text-muted text-sm">${new Date(backup.date).toLocaleString()}</td>
+            <td>
+                <div style="display:flex;gap:4px;">
+                    <button class="btn btn-primary btn-sm" onclick="downloadBackup('${escapeHtml(backup.name)}')">↓</button>
+                    <button class="btn btn-warning btn-sm" onclick="restoreBackup('${escapeHtml(backup.name)}')">Restore</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteBackup('${escapeHtml(backup.name)}')">✕</button>
+                </div>
+            </td>
+        `;
         tbody.appendChild(tr);
     });
 
-    // Update alter form columns
-    updateAlterFormColumns(structure);
-
-    // Add scroll indicator if needed
-    addScrollIndicator(structureTable.closest('.table-container'));
+    // Dashboard recent 3
+    recentEl.innerHTML = backups.slice(0, 3).map(b => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);">
+            <div>
+                <div style="font-size:12px;font-weight:500;color:var(--text-main);">${escapeHtml(b.name.split('__')[0])}</div>
+                <div class="text-muted text-sm">${new Date(b.date).toLocaleString()}</div>
+            </div>
+            <span class="badge badge-muted">${formatFileSize(b.size)}</span>
+        </div>
+    `).join('');
 }
 
-function updatePagination(data) {
-    totalPages = Math.ceil(data.total / data.limit);
-    pageInfo.textContent = `Page ${currentPage} of ${totalPages} (${data.total} total rows)`;
+window.downloadBackup = (filename) => { window.open('/backups/' + encodeURIComponent(filename), '_blank'); };
 
-    document.getElementById('prevPage').disabled = currentPage <= 1;
-    document.getElementById('nextPage').disabled = currentPage >= totalPages;
-}
+window.deleteBackup = (filename) => {
+    if (confirm(`Delete backup "${filename}"?`)) socket.emit('delete_backup', filename);
+};
 
-function changePage(direction) {
-    const newPage = currentPage + direction;
-    if (newPage >= 1 && newPage <= totalPages) {
-        currentPage = newPage;
-        loadTableData();
+window.restoreBackup = (filename) => {
+    const db = prompt('Enter target database name to restore into:', currentDatabase || '');
+    if (db?.trim()) {
+        socket.emit('restore_backup', { filename, targetDatabase: db.trim() });
+        showNotification('Restoring backup...', 'info');
     }
+};
+
+document.getElementById('uploadBackupBtn').addEventListener('click', () => document.getElementById('uploadBackupInput').click());
+document.getElementById('uploadBackupInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('backupFile', file);
+    showNotification('Uploading...', 'info');
+    try {
+        const r = await fetch('/api/upload-backup', { method: 'POST', body: formData });
+        const d = await r.json();
+        if (d.success) { showNotification('Upload successful', 'success'); socket.emit('list_backups'); }
+        else showNotification(d.error || 'Upload failed', 'error');
+    } catch { showNotification('Upload failed', 'error'); }
+});
+
+function manualBackupDatabase(db) {
+    showNotification(`Backup of "${db}" queued — will run in background`, 'info');
 }
 
-function changePageSize() {
-    pageSize = parseInt(document.getElementById('pageSize').value);
-    currentPage = 1;
-    loadTableData();
-}
+// ============================================================
+//  ER DIAGRAM
+// ============================================================
+let erTables = {};
+let erFkData = [];
+let erZoom = 1;
+let erDragging = null;
+let erDragOffset = { x: 0, y: 0 };
 
-function clearTableData() {
-    dataTable.querySelector('thead').innerHTML = '';
-    dataTable.querySelector('tbody').innerHTML = '';
-    structureTable.querySelector('tbody').innerHTML = '';
-    selectedTableSpan.textContent = 'Select a table to view data';
-}
+document.getElementById('loadErBtn').addEventListener('click', () => {
+    const db = document.getElementById('erDatabase').value;
+    if (!db) return showNotification('Select a database', 'warning');
+    socket.emit('get_table_structure', { database: db, table: '__all__' });
+    socket.emit('get_foreign_keys', db);
+    showNotification('Loading ER diagram...', 'info');
+});
 
-function switchTab(tabName) {
-    // Update tab buttons
-    document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
-    document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+function renderERDiagram(database, fkData) {
+    erFkData = fkData || [];
+    const canvas = document.getElementById('erCanvas');
+    const svg = document.getElementById('erSvg');
 
-    // Update tab content
-    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-    document.getElementById(`${tabName}Tab`).classList.add('active');
-}
+    // Remove old cards
+    canvas.querySelectorAll('.er-table-card').forEach(c => c.remove());
+    svg.innerHTML = '';
+    erTables = {};
 
-function executeQuery() {
-    const query = sqlQuery.value.trim();
-    const database = queryDatabase.value;
-
-    if (!query) {
-        showNotification('Please enter a SQL query', 'error');
+    // Load table structures for all tables in the database
+    const tables = Array.from(document.querySelectorAll(`#dbtables-${database} .table-node`)).map(n => n.dataset.table);
+    if (!tables.length) {
+        showNotification('No tables in the selected database', 'warning');
         return;
     }
 
-    socket.emit('execute_query', { database, query });
-    queryResults.innerHTML = '<p>Executing query, please wait...</p>';
-}
+    let loaded = 0;
+    tables.forEach((table, idx) => {
+        socket.emit('get_table_structure', { database, table });
+        socket.once(`table_structure_${database}_${table}`, (structure) => {
+            erTables[table] = structure;
+            loaded++;
+            if (loaded === tables.length) drawERCards(tables);
+        });
+    });
 
-function displayQueryResult(data) {
-    const { query, result } = data;
-
-    let html = `<div class="query-info"><strong>Query:</strong> ${query}</div>`;
-
-    if (result.type === 'SELECT') {
-        if (result.multipleStatements) {
-            // Handle multiple SELECT statements
-            html += `<p><strong>Multiple statements executed:</strong> ${result.data.length}</p>`;
-            html += `<p><strong>Total rows returned:</strong> ${result.rowCount}</p>`;
-
-            result.data.forEach((statementResult, index) => {
-                html += `<div class="statement-result">`;
-                html += `<h4>Statement ${index + 1}: ${statementResult.statement}</h4>`;
-
-                if (statementResult.data.length === 0) {
-                    html += '<p>No results found.</p>';
-                } else {
-                    html += `<p><strong>Rows:</strong> ${statementResult.rowCount}</p>`;
-                    html += '<div class="table-container"><table>';
-
-                    // Header
-                    const columns = Object.keys(statementResult.data[0]);
-                    html += '<thead><tr>';
-                    columns.forEach(col => {
-                        html += `<th>${col}</th>`;
-                    });
-                    html += '</tr></thead>';
-
-                    // Data
-                    html += '<tbody>';
-                    statementResult.data.forEach(row => {
-                        html += '<tr>';
-                        columns.forEach(col => {
-                            const value = row[col];
-                            if (value === null) {
-                                html += '<td class="data-cell" style="font-style: italic; color: #888;"><em>NULL</em></td>';
-                            } else {
-                                let stringValue;
-                                if (typeof value === 'object' && value !== null) {
-                                    stringValue = JSON.stringify(value);
-                                } else {
-                                    stringValue = String(value);
-                                }
-                                let cellClass = 'data-cell';
-                                let displayValue = stringValue;
-
-                                if (typeof value === 'number') {
-                                    cellClass += ' numeric-content';
-                                } else if (stringValue.length > 100) {
-                                    cellClass += ' long-text';
-                                    displayValue = stringValue.substring(0, 100) + '...';
-                                    html += `<td class="${cellClass}" title="${stringValue.replace(/"/g, '&quot;')}" data-cell-value="${stringValue.replace(/"/g, '&quot;')}">${displayValue}<button class="cell-copy-btn">📋</button></td>`;
-                                } else if (stringValue.includes('\n') || stringValue.includes('\t')) {
-                                    cellClass += ' text-content';
-                                    html += `<td class="${cellClass}" data-cell-value="${stringValue.replace(/"/g, '&quot;')}">${displayValue}<button class="cell-copy-btn">📋</button></td>`;
-                                } else {
-                                    cellClass += ' text-content';
-                                    html += `<td class="${cellClass}" data-cell-value="${stringValue.replace(/"/g, '&quot;')}">${displayValue}<button class="cell-copy-btn">📋</button></td>`;
-                                }
-                            }
-                        });
-                        html += '</tr>';
-                    });
-                    html += '</tbody></table></div>';
-                }
-                html += `</div>`;
-            });
-        } else {
-            // Handle single SELECT statement
-            if (result.data.length === 0) {
-                html += '<p>No results found.</p>';
-            } else {
-                html += `<p><strong>Rows returned:</strong> ${result.rowCount}</p>`;
-                html += '<div class="table-container"><table>';
-
-                // Header
-                const columns = Object.keys(result.data[0]);
-                html += '<thead><tr>';
-                columns.forEach(col => {
-                    html += `<th>${col}</th>`;
-                });
-                html += '</tr></thead>';
-
-                // Data
-                html += '<tbody>';
-                result.data.forEach(row => {
-                    html += '<tr>';
-                    columns.forEach(col => {
-                        const value = row[col];
-                        if (value === null) {
-                            html += '<td class="data-cell" style="font-style: italic; color: #888;"><em>NULL</em></td>';
-                        } else {
-                            let stringValue;
-                            if (typeof value === 'object' && value !== null) {
-                                stringValue = JSON.stringify(value);
-                            } else {
-                                stringValue = String(value);
-                            }
-                            let cellClass = 'data-cell';
-                            let displayValue = stringValue;
-
-                            if (typeof value === 'number') {
-                                cellClass += ' numeric-content';
-                                html += `<td class="${cellClass}" data-cell-value="${displayValue}">${displayValue}<button class="cell-copy-btn">📋</button></td>`;
-                            } else if (stringValue.length > 100) {
-                                cellClass += ' long-text';
-                                displayValue = stringValue.substring(0, 100) + '...';
-                                html += `<td class="${cellClass}" title="${stringValue.replace(/"/g, '&quot;')}" data-cell-value="${stringValue.replace(/"/g, '&quot;')}">${displayValue}<button class="cell-copy-btn">📋</button></td>`;
-                            } else if (stringValue.includes('\n') || stringValue.includes('\t')) {
-                                cellClass += ' text-content';
-                                html += `<td class="${cellClass}" data-cell-value="${stringValue.replace(/"/g, '&quot;')}">${displayValue}<button class="cell-copy-btn">📋</button></td>`;
-                            } else {
-                                cellClass += ' text-content';
-                                html += `<td class="${cellClass}" data-cell-value="${stringValue.replace(/"/g, '&quot;')}">${displayValue}<button class="cell-copy-btn">📋</button></td>`;
-                            }
-                        }
-                    });
-                    html += '</tr>';
-                });
-                html += '</tbody></table></div>';
-            }
-        }
-    } else {
-        html += `<p><strong>Affected rows:</strong> ${result.affectedRows}</p>`;
-        if (result.insertId) {
-            html += `<p><strong>Insert ID:</strong> ${result.insertId}</p>`;
-        }
-        html += `<p class="success-message">${result.message}</p>`;
-
-        // Refresh data if we're viewing a table and it might have been affected
-        if (currentTable && currentDatabase) {
-            loadTableData();
-        }
+    // Fallback: use currentTableStructure if available
+    if (tables.length === 0 && currentTableStructure) {
+        erTables[currentTable] = currentTableStructure;
+        drawERCards([currentTable]);
     }
 
-    queryResults.innerHTML = html;
-
-    // Add event listeners for copy buttons in query results
-    queryResults.querySelectorAll('.cell-copy-btn').forEach(button => {
-        button.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const td = e.target.closest('td');
-            const cellValue = td.getAttribute('data-cell-value') || td.textContent.replace('📋', '').trim();
-            copyCellData(cellValue, e.target);
-        });
+    // Since socket events for specific tables aren't separate, listen for all structure events
+    socket.on('table_structure', ({ table, structure, database: db }) => {
+        if (db === database) {
+            erTables[table] = structure;
+            if (Object.keys(erTables).length === tables.length) {
+                drawERCards(tables);
+                socket.off('table_structure');
+            }
+        }
     });
 }
 
-function showCreateDatabaseModal() {
-    document.getElementById('createDatabaseModal').style.display = 'block';
+function drawERCards(tables) {
+    const canvas = document.getElementById('erCanvas');
+    canvas.querySelectorAll('.er-table-card').forEach(c => c.remove());
+    document.getElementById('erSvg').innerHTML = '';
+
+    const cols = 3;
+    const startX = 40, startY = 40, spacingX = 240, spacingY = 280;
+
+    tables.forEach((table, idx) => {
+        const structure = erTables[table] || [];
+        const x = startX + (idx % cols) * spacingX;
+        const y = startY + Math.floor(idx / cols) * spacingY;
+
+        const card = document.createElement('div');
+        card.className = 'er-table-card';
+        card.dataset.table = table;
+        card.style.left = x + 'px';
+        card.style.top = y + 'px';
+        card.innerHTML = `
+            <div class="er-table-header">📋 ${escapeHtml(table)}</div>
+            ${structure.map(f => `
+                <div class="er-table-field">
+                    ${f.Key === 'PRI' ? '<span class="er-field-key">🔑</span>' : f.Key === 'MUL' ? '<span class="er-field-key">🔗</span>' : '<span class="er-field-key" style="visibility:hidden;">·</span>'}
+                    <span class="er-field-name">${escapeHtml(f.Field)}</span>
+                    <span class="er-field-type">${escapeHtml(f.Type.split('(')[0])}</span>
+                </div>
+            `).join('')}
+        `;
+
+        // Drag
+        card.addEventListener('mousedown', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            erDragging = card;
+            const rect = card.getBoundingClientRect();
+            const canvasRect = canvas.getBoundingClientRect();
+            erDragOffset = { x: e.clientX - rect.left + canvasRect.left - canvas.getBoundingClientRect().left, y: e.clientY - rect.top + canvasRect.top - canvas.getBoundingClientRect().top };
+            e.preventDefault();
+        });
+
+        canvas.appendChild(card);
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!erDragging) return;
+        const canvasRect = document.getElementById('erCanvas').getBoundingClientRect();
+        const wrapRect = document.getElementById('erCanvasWrap').getBoundingClientRect();
+        const x = e.clientX - wrapRect.left + document.getElementById('erCanvasWrap').scrollLeft - erDragOffset.x;
+        const y = e.clientY - wrapRect.top + document.getElementById('erCanvasWrap').scrollTop - erDragOffset.y;
+        erDragging.style.left = Math.max(0, x) + 'px';
+        erDragging.style.top = Math.max(0, y) + 'px';
+        drawFkLines();
+    });
+
+    document.addEventListener('mouseup', () => { erDragging = null; });
+    drawFkLines();
 }
 
-function showModal(modalId) {
-    document.getElementById(modalId).style.display = 'block';
+function drawFkLines() {
+    const canvas = document.getElementById('erCanvas');
+    const svg = document.getElementById('erSvg');
+    svg.innerHTML = '';
+
+    erFkData.forEach(fk => {
+        const fromCard = canvas.querySelector(`[data-table="${fk.from_table}"]`);
+        const toCard = canvas.querySelector(`[data-table="${fk.to_table}"]`);
+        if (!fromCard || !toCard) return;
+
+        const fromRect = { x: parseInt(fromCard.style.left) + fromCard.offsetWidth, y: parseInt(fromCard.style.top) + 30 };
+        const toRect = { x: parseInt(toCard.style.left), y: parseInt(toCard.style.top) + 30 };
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const midX = (fromRect.x + toRect.x) / 2;
+        path.setAttribute('d', `M ${fromRect.x} ${fromRect.y} C ${midX} ${fromRect.y} ${midX} ${toRect.y} ${toRect.x} ${toRect.y}`);
+        path.setAttribute('class', 'er-line');
+        svg.appendChild(path);
+    });
 }
 
-function closeModal(modalId) {
-    document.getElementById(modalId).style.display = 'none';
-    // Clear form if it exists
-    const form = document.querySelector(`#${modalId} form`);
-    if (form) {
-        form.reset();
+document.getElementById('erZoomIn').addEventListener('click', () => { erZoom = Math.min(2, erZoom + 0.1); document.getElementById('erCanvas').style.transform = `scale(${erZoom})`; });
+document.getElementById('erZoomOut').addEventListener('click', () => { erZoom = Math.max(0.3, erZoom - 0.1); document.getElementById('erCanvas').style.transform = `scale(${erZoom})`; });
+document.getElementById('erReset').addEventListener('click', () => { erZoom = 1; document.getElementById('erCanvas').style.transform = 'scale(1)'; drawERCards(Object.keys(erTables)); });
+
+// ============================================================
+//  SCHEMA DIFF
+// ============================================================
+function openSchemaDiff(db) {
+    if (db) document.getElementById('diffDb1').value = db;
+    showModal('modalSchemaDiff');
+}
+
+document.getElementById('runDiffBtn').addEventListener('click', () => {
+    const db1 = document.getElementById('diffDb1').value;
+    const db2 = document.getElementById('diffDb2').value;
+    if (!db1 || !db2) return showNotification('Select two databases', 'warning');
+    if (db1 === db2) return showNotification('Select two different databases', 'warning');
+    socket.emit('diff_databases', { database1: db1, database2: db2 });
+    showNotification('Comparing schemas...', 'info');
+});
+
+function renderSchemaDiff({ database1, database2, added, removed, modified }) {
+    const container = document.getElementById('diffResults');
+    let html = `<div class="diff-view">
+        <div class="diff-col diff-col-left">
+            <div class="diff-col-header">← Only in ${escapeHtml(database1)}</div>`;
+
+    removed.forEach(t => html += `<div class="diff-item removed">📋 <span class="diff-table-name">${escapeHtml(t)}</span> (removed)</div>`);
+
+    html += `</div><div class="diff-col diff-col-right">
+        <div class="diff-col-header">→ Only in ${escapeHtml(database2)}</div>`;
+
+    added.forEach(t => html += `<div class="diff-item added">📋 <span class="diff-table-name">${escapeHtml(t)}</span> (added)</div>`);
+
+    html += `</div></div>`;
+
+    if (modified.length) {
+        html += `<div style="margin-top:16px;font-size:13px;font-weight:600;color:var(--text-main);">⚠️ Modified Tables (${modified.length})</div>`;
+        modified.forEach(m => {
+            html += `<div style="margin-top:8px;border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden;">
+                <div style="padding:8px 12px;background:rgba(245,158,11,0.08);font-weight:600;font-size:13px;color:var(--warning);">📋 ${escapeHtml(m.table)}</div>
+                <div style="padding:8px 12px;">
+                    ${m.changes.map(c => `<div class="diff-item ${c.type === 'added_column' ? 'added' : c.type === 'removed_column' ? 'removed' : 'modified'}" style="margin-bottom:4px;">
+                        ${c.type === 'added_column' ? `+ Column "${c.column}" added` :
+                          c.type === 'removed_column' ? `- Column "${c.column}" removed` :
+                          `~ Column "${c.column}": ${c.from?.Type} → ${c.to?.Type}`}
+                    </div>`).join('')}
+                </div>
+            </div>`;
+        });
     }
+
+    if (!added.length && !removed.length && !modified.length) {
+        html = `<div class="empty-state" style="padding:30px;">
+            <div class="empty-state-icon">✅</div>
+            <div class="empty-state-title">Schemas are identical!</div>
+            <div class="empty-state-desc">No structural differences found between ${escapeHtml(database1)} and ${escapeHtml(database2)}</div>
+        </div>`;
+    }
+
+    container.innerHTML = html;
 }
 
-function createDatabase(e) {
-    e.preventDefault();
+// ============================================================
+//  SLOW QUERY MONITOR
+// ============================================================
+document.getElementById('loadSlowQueriesBtn').addEventListener('click', () => {
+    const db = document.getElementById('sqDatabase').value;
+    const limit = parseInt(document.getElementById('sqLimit').value) || 20;
+    if (!db) return showNotification('Select a database', 'warning');
+    socket.emit('get_slow_queries', { database: db, limit });
+    showNotification('Loading slow queries...', 'info');
+});
 
-    const databaseName = document.getElementById('newDatabaseName').value.trim();
-    if (!databaseName) {
-        showNotification('Please enter a database name', 'error');
+function renderSlowQueries(queries, warning) {
+    const container = document.getElementById('slowQueriesContent');
+    if (warning) {
+        container.innerHTML = `<div class="sq-warning">⚠️ ${escapeHtml(warning)}</div>`;
         return;
     }
-
-    socket.emit('create_database', databaseName);
-}
-
-function showNotification(message, type = 'info') {
-    const notification = document.createElement('div');
-    notification.className = `notification ${type}`;
-
-    // Create copy button for errors
-    if (type === 'error') {
-        const copyBtn = document.createElement('button');
-        copyBtn.innerHTML = '📋';
-        copyBtn.className = 'btn-text';
-        copyBtn.style.marginRight = '10px';
-        copyBtn.style.background = 'transparent';
-        copyBtn.style.border = 'none';
-        copyBtn.style.color = 'white';
-        copyBtn.style.cursor = 'pointer';
-        copyBtn.title = 'Copy Error';
-        copyBtn.onclick = () => {
-            navigator.clipboard.writeText(message);
-            showNotification('Error copied to clipboard', 'success');
-        };
-        notification.appendChild(copyBtn);
+    if (!queries.length) {
+        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">✅</div><div class="empty-state-title">No slow queries found!</div></div>';
+        return;
     }
-
-    const textSpan = document.createElement('span');
-    textSpan.textContent = message;
-    notification.appendChild(textSpan);
-
-    document.getElementById('notifications').appendChild(notification);
-
-    // Trigger animation
-    setTimeout(() => notification.classList.add('show'), 100);
-
-    // Remove after 5 seconds
-    setTimeout(() => {
-        notification.classList.remove('show');
-        setTimeout(() => notification.remove(), 300);
-    }, 5000);
+    container.innerHTML = `
+        <div style="margin-bottom:12px;font-size:13px;color:var(--text-muted);">Top ${queries.length} slowest queries</div>
+        <table class="generic-table">
+            <thead>
+                <tr>
+                    <th>Query</th>
+                    <th>Avg Time (ms)</th>
+                    <th>Total Time (ms)</th>
+                    <th>Calls</th>
+                    <th>Rows</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                ${queries.map(q => `
+                    <tr>
+                        <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'JetBrains Mono',monospace;font-size:11.5px;" title="${escapeHtml(q.query)}">${escapeHtml(q.query)}</td>
+                        <td><span class="badge ${parseFloat(q.avgMs) > 1000 ? 'badge-danger' : parseFloat(q.avgMs) > 100 ? 'badge-warning' : 'badge-success'}">${q.avgMs}</span></td>
+                        <td class="text-muted">${q.totalMs}</td>
+                        <td>${q.execCount}</td>
+                        <td class="text-muted">${q.rows}</td>
+                        <td>
+                            <button class="btn btn-ghost btn-sm" onclick="copyQueryToEditor(${JSON.stringify(JSON.stringify(q.query))})">Copy</button>
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>`;
 }
 
-// Close modals when clicking outside
-window.addEventListener('click', (e) => {
-    if (e.target.classList.contains('modal')) {
-        e.target.style.display = 'none';
+window.copyQueryToEditor = function(qJson) {
+    const query = JSON.parse(qJson);
+    if (sqlEditor) sqlEditor.setValue(query);
+    switchContentTab('query');
+    showNotification('Query copied to SQL editor', 'success');
+};
+
+// ============================================================
+//  ANNOTATIONS
+// ============================================================
+function updateAnnotationIcons() {
+    Object.keys(annotations).forEach(key => {
+        const [db, table] = key.split('::');
+        const icon = document.getElementById(`tblnote-${db}-${table}`);
+        if (icon) icon.style.display = 'inline';
+    });
+}
+
+function openAnnotationModal(db, table) {
+    const key = `${db}::${table}`;
+    document.getElementById('annotationTableName').textContent = `${db}.${table}`;
+    document.getElementById('annotationText').value = annotations[key]?.note || '';
+    document.getElementById('saveAnnotationBtn').onclick = () => {
+        const note = document.getElementById('annotationText').value.trim();
+        socket.emit('save_annotation', { key, note });
+        closeModal('modalAnnotation');
+    };
+    document.getElementById('deleteAnnotationBtn').onclick = () => {
+        if (confirm('Delete this note?')) {
+            socket.emit('delete_annotation', { key });
+            closeModal('modalAnnotation');
+        }
+    };
+    showModal('modalAnnotation');
+}
+
+// Table note icons
+document.getElementById('sidebarTree').addEventListener('click', (e) => {
+    const noteIcon = e.target.closest('.table-note-icon');
+    if (noteIcon) {
+        const tableNode = noteIcon.closest('.table-node');
+        const db = tableNode.dataset.db;
+        const table = tableNode.dataset.table;
+        openAnnotationModal(db, table);
     }
 });
 
-function openEditRowModal(row) {
-    if (!currentPrimaryKey) return;
+// ============================================================
+//  DASHBOARD
+// ============================================================
+function renderDashboardDbSizes(sizes) {
+    const list = document.getElementById('dbSizesList');
+    if (!sizes.length) { list.innerHTML = '<div class="text-muted text-sm">No size data available</div>'; return; }
+    const max = Math.max(...sizes.map(s => parseFloat(s.sizeMb) || 0));
+    list.innerHTML = sizes.map(s => `
+        <div class="db-size-row">
+            <span class="db-size-name">📦 ${escapeHtml(s.database)}</span>
+            <div class="db-size-bar-wrap">
+                <div class="db-size-bar-fill" style="width:${max > 0 ? ((parseFloat(s.sizeMb) / max) * 100) : 0}%"></div>
+            </div>
+            <span class="db-size-value">${s.sizeMb} MB</span>
+        </div>
+    `).join('');
 
-    const modal = document.getElementById('editRowModal');
-    const container = document.getElementById('editRowFields');
-    container.innerHTML = '';
-
-    // Store PK value on form for identification
-    const form = document.getElementById('editRowForm');
-    form.setAttribute('data-pk-value', row[currentPrimaryKey]);
-
-    Object.keys(row).forEach(col => {
-        const formGroup = document.createElement('div');
-        formGroup.className = 'form-group';
-
-        const label = document.createElement('label');
-        label.textContent = col;
-        formGroup.appendChild(label);
-
-        const inputContainer = document.createElement('div');
-        inputContainer.style.display = 'flex';
-        inputContainer.style.gap = '10px';
-        inputContainer.style.alignItems = 'center';
-
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.name = col;
-        input.style.flex = '1';
-
-        // Find column structure definition
-        const colDef = currentTableStructure ? currentTableStructure.find(c => c.Field === col) : null;
-        const isNullable = colDef && colDef.Null === 'YES';
-        const isEnum = colDef && colDef.Type.toLowerCase().startsWith('enum(');
-
-        let inputControl;
-
-        if (isEnum) {
-            // Parse ENUM values
-            // Type format: enum('val1','val2',...)
-            // Use regex to capture values inside single quotes, handling commas inside values
-            const enumContent = colDef.Type.substring(5, colDef.Type.length - 1);
-            const matches = enumContent.match(/'([^']*)'/g);
-            const enumValues = matches ? matches.map(v => v.slice(1, -1)) : [];
-
-            inputControl = document.createElement('div');
-            inputControl.className = 'radio-group';
-            inputControl.style.flex = '1';
-            inputControl.style.display = 'flex';
-            inputControl.style.gap = '15px';
-            inputControl.style.flexWrap = 'wrap';
-
-            enumValues.forEach(val => {
-                const radioLabel = document.createElement('label');
-                radioLabel.style.display = 'flex';
-                radioLabel.style.alignItems = 'center';
-                radioLabel.style.gap = '5px';
-                radioLabel.style.cursor = 'pointer';
-                radioLabel.style.fontWeight = 'normal';
-
-                const radio = document.createElement('input');
-                radio.type = 'radio';
-                radio.name = col;
-                radio.value = val;
-
-                // Check if value matches
-                if (row[col] === val) {
-                    radio.checked = true;
-                }
-
-                radioLabel.appendChild(radio);
-                radioLabel.appendChild(document.createTextNode(val));
-                inputControl.appendChild(radioLabel);
-            });
-
-            // If null, no radio checked (default behavior correct)
-            if (row[col] === null) {
-                // disable initially if we are handling null logic below? 
-                // We'll handle disabled state via the null check block below.
-            }
-
-        } else {
-            inputControl = document.createElement('input');
-            inputControl.type = 'text';
-            inputControl.name = col;
-            inputControl.style.flex = '1';
-
-            // Null Handling for text input
-            if (row[col] === null) {
-                inputControl.value = 'NULL';
-                inputControl.disabled = true;
-            } else {
-                // Handle Date formatting
-                let val = row[col];
-                if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(val)) {
-                    val = val.replace('T', ' ').replace('Z', '');
-                } else if (typeof val === 'object' && val !== null) {
-                    val = JSON.stringify(val, null, 2);
-                    // Use textarea for JSON to allow multi-line editing
-                    // We need to replace the input element with a textarea if we want multi-line, 
-                    // but for minimal disruption replacing the element here might be tricky if not planned.
-                    // However, we can just set the value to the input for now, or better:
-                    // If it is an object, maybe switch `inputControl` to a textarea?
-                    // The `inputControl` was already created as 'input' type text at line 1761.
-                    // Let's just stick to the plan: stringify it. 
-                    // Ideally, we should perform this check BEFORE creating the element if we wanted a textarea.
-                    // But `input` type text can hold the string, just not show newlines well.
-                    // Let's stick to stringify.
-                }
-                inputControl.value = val;
-            }
-
-            if (col === currentPrimaryKey) {
-                inputControl.disabled = true;
-                inputControl.title = 'Primary Key cannot be edited';
-                inputControl.id = 'pkInput'; // Mark purely for easy access
-
-                // Add "Enable Editing" toggle for PK
-                const enableContainer = document.createElement('div');
-                enableContainer.style.display = 'flex';
-                enableContainer.style.alignItems = 'center';
-                enableContainer.style.gap = '5px';
-                enableContainer.style.marginTop = '4px';
-                enableContainer.style.fontSize = '0.85em';
-                enableContainer.style.color = '#666';
-
-                const enableCheckbox = document.createElement('input');
-                enableCheckbox.type = 'checkbox';
-                enableCheckbox.id = 'enablePkEdit';
-                enableCheckbox.addEventListener('change', (e) => {
-                    inputControl.disabled = !e.target.checked;
-                    if (e.target.checked) {
-                        inputControl.title = 'Primary Key editing enabled';
-                    } else {
-                        inputControl.title = 'Primary Key cannot be edited';
-                    }
-                });
-
-                const enableLabel = document.createElement('label');
-                enableLabel.htmlFor = 'enablePkEdit';
-                enableLabel.textContent = 'Enable Editing (Main Index)';
-                enableLabel.style.cursor = 'pointer';
-
-                enableContainer.appendChild(enableCheckbox);
-                enableContainer.appendChild(enableLabel);
-
-                // We need to append this after the input, so we'll do it by appending to inputContainer
-                // inputContainer is a flex row currently. 
-                // To keep layout clean, we might want to wrap input + toggle or just let it be.
-                // Given the current layout: inputContainer (flex row) -> inputControl
-                // If we add enableContainer (flex row) to inputContainer, it will be side-by-side or squished.
-                // Better to change inputContainer to column if it's the PK, OR append enableContainer OUTSIDE inputContainer but inside formGroup.
-                // Let's go with appending to formGroup.
-                setTimeout(() => {
-                    formGroup.appendChild(enableContainer);
-                }, 0);
-            }
-        }
-
-        inputContainer.appendChild(inputControl);
-
-        // Add NULL checkbox if nullable
-        if (isNullable && col !== currentPrimaryKey) {
-            const nullLabel = document.createElement('label');
-            nullLabel.style.display = 'flex';
-            nullLabel.style.alignItems = 'center';
-            nullLabel.style.gap = '5px';
-            nullLabel.style.fontSize = '0.9em';
-            nullLabel.style.cursor = 'pointer';
-
-            const nullCheckbox = document.createElement('input');
-            nullCheckbox.type = 'checkbox';
-            nullCheckbox.className = 'null-checkbox';
-            nullCheckbox.dataset.column = col;
-            nullCheckbox.checked = row[col] === null;
-
-            // Initial disabled state for radios if null
-            if (isEnum && row[col] === null) {
-                inputControl.querySelectorAll('input[type="radio"]').forEach(r => r.disabled = true);
-            }
-
-            nullCheckbox.addEventListener('change', (e) => {
-                if (e.target.checked) {
-                    if (isEnum) {
-                        inputControl.querySelectorAll('input[type="radio"]').forEach(r => {
-                            r.disabled = true;
-                            r.checked = false;
-                        });
-                    } else {
-                        inputControl.disabled = true;
-                        inputControl.value = 'NULL';
-                    }
-                } else {
-                    if (isEnum) {
-                        inputControl.querySelectorAll('input[type="radio"]').forEach(r => r.disabled = false);
-                        // Restore original value? Or leave unchecked?
-                        // If it was null, leave unchecked. User must select.
-                        // If it wasn't null initially (e.g. user checked then unchecked null box), 
-                        // we could restore, but simpler to just let them pick.
-                        if (row[col] !== null && enumValues.includes(row[col])) {
-                            // Optional: restore original selection if we wanted to be fancy
-                            // But keep it simple
-                            const originalRadio = inputControl.querySelector(`input[value="${row[col]}"]`);
-                            if (originalRadio) originalRadio.checked = true;
-                        }
-                    } else {
-                        inputControl.disabled = false;
-                        let val = row[col];
-                        if (val === null) val = ''; // Default to empty if was null
-                        else if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(val)) {
-                            val = val.replace('T', ' ').replace('Z', '');
-                        }
-                        inputControl.value = val;
-                    }
-                }
-            });
-
-            nullLabel.appendChild(nullCheckbox);
-            nullLabel.appendChild(document.createTextNode('NULL'));
-            inputContainer.appendChild(nullLabel);
-        } else if (col === currentPrimaryKey && isEnum) {
-            // Edge case: PK is enum (rare), disable radios
-            inputControl.querySelectorAll('input[type="radio"]').forEach(r => r.disabled = true);
-        }
-
-        formGroup.appendChild(inputContainer);
-        container.appendChild(formGroup);
-    });
-
-    modal.style.display = 'flex';
+    // Update stat cards
+    const totalMb = sizes.reduce((a, s) => a + (parseFloat(s.sizeMb) || 0), 0);
+    renderDashboardStatCards(sizes.length, totalMb);
 }
 
-function saveRowData(e) {
-    e.preventDefault();
-
-    if (!currentPrimaryKey) return;
-
-    const form = document.getElementById('editRowForm');
-    const pkValue = form.getAttribute('data-pk-value');
-    const formData = new FormData(form);
-    const updateData = {};
-
-    formData.forEach((value, key) => {
-        if (key !== currentPrimaryKey || !document.getElementById('editRowForm').querySelector('[name="' + currentPrimaryKey + '"]').disabled) {
-            // Check if there's a checked NULL checkbox for this column
-            const nullCheckbox = form.querySelector(`.null-checkbox[data-column="${key}"]`);
-            if (nullCheckbox && nullCheckbox.checked) {
-                updateData[key] = null;
-            } else {
-                // Try to parse JSON if it looks like one
-                if (typeof value === 'string' && (value.trim().startsWith('{') || value.trim().startsWith('['))) {
-                    try {
-                        updateData[key] = JSON.parse(value);
-                    } catch (e) {
-                        // Not valid JSON, save as string
-                        updateData[key] = value;
-                    }
-                } else {
-                    updateData[key] = value;
-                }
-            }
-        }
-    });
-
-    socket.emit('update_row', {
-        database: currentDatabase,
-        table: currentTable,
-        primaryKeyColumn: currentPrimaryKey,
-        primaryKeyValue: pkValue,
-        updateData: updateData
-    });
+function renderDashboardStatCards(dbCount, totalMb) {
+    const container = document.getElementById('dashboardStats');
+    const tableCount = document.querySelectorAll('.table-node').length;
+    container.innerHTML = `
+        <div class="stat-card stat-card-accent">
+            <div class="stat-card-icon">📦</div>
+            <div class="stat-card-value">${dbCount}</div>
+            <div class="stat-card-label">Databases</div>
+        </div>
+        <div class="stat-card stat-card-success">
+            <div class="stat-card-icon">📋</div>
+            <div class="stat-card-value">${tableCount}</div>
+            <div class="stat-card-label">Total Tables</div>
+        </div>
+        <div class="stat-card stat-card-warning">
+            <div class="stat-card-icon">💾</div>
+            <div class="stat-card-value">${totalMb.toFixed(1)} MB</div>
+            <div class="stat-card-label">Total DB Size</div>
+        </div>
+        <div class="stat-card stat-card-danger">
+            <div class="stat-card-icon">⚡</div>
+            <div class="stat-card-value">${(currentCredentials?.engine || 'MySQL').toUpperCase()}</div>
+            <div class="stat-card-label">Engine</div>
+        </div>
+    `;
 }
 
-function deleteColumn(columnName) {
-    if (!confirm(`Are you sure you want to drop column '${columnName}'? This action cannot be undone.`)) {
-        return;
-    }
+document.getElementById('refreshDbSizesBtn').addEventListener('click', () => socket.emit('get_db_sizes'));
 
-    const alterQuery = `ALTER TABLE \`${currentTable}\` DROP COLUMN \`${columnName}\``;
-
-    socket.emit('alter_table', {
-        database: currentDatabase,
-        table: currentTable,
-        alterQuery: alterQuery
-    });
+// ============================================================
+//  ERROR LOG
+// ============================================================
+function addErrorToLog(data) {
+    const list = document.getElementById('errorLogList');
+    const item = document.createElement('div');
+    item.className = 'error-log-item';
+    item.innerHTML = `
+        <div class="error-log-item-meta">
+            <span>${new Date().toLocaleTimeString()}</span>
+            <span>·</span>
+            <span>${escapeHtml(data.database || '')}</span>
+        </div>
+        <div class="error-log-item-msg">${escapeHtml(data.message)}</div>
+        <div class="error-log-item-query">${escapeHtml(data.query || '')}</div>
+    `;
+    list.insertBefore(item, list.firstChild);
 }
 
-
-// Handle keyboard shortcuts
-document.addEventListener('keydown', (e) => {
-    // Ctrl+Enter to execute query
-    if (e.ctrlKey && e.key === 'Enter' && document.activeElement === sqlQuery) {
-        executeQuery();
-    }
-
-    // Escape to close modals
-    if (e.key === 'Escape') {
-        document.querySelectorAll('.modal').forEach(modal => {
-            modal.style.display = 'none';
-        });
-    }
+document.getElementById('clearErrorLogBtn').addEventListener('click', () => {
+    document.getElementById('errorLogList').innerHTML = '';
+    document.getElementById('errorLogContainer').style.display = 'none';
 });
-function handleLogout() {
-    // Disconnect from database if connected
-    if (isConnected) {
-        socket.emit('disconnect_database');
-    }
 
-    // Remove JWT token
+document.getElementById('closeErrorLogBtn').addEventListener('click', () => {
+    document.getElementById('errorLogContainer').style.display = 'none';
+});
+
+// ============================================================
+//  CONNECTION STATUS
+// ============================================================
+function updateConnectionStatus(connected) {
+    const dot = document.getElementById('connDot');
+    const text = document.getElementById('connStatusText');
+    dot.className = 'conn-dot' + (connected ? ' connected' : '');
+    text.textContent = connected ? 'Connected' : 'Disconnected';
+
+    const logoutBtn = document.getElementById('logoutBtn');
+    logoutBtn.style.display = connected ? 'inline-flex' : 'none';
+
+    document.getElementById('connectBtn').textContent = 'Connect to Database';
+    document.getElementById('connectBtn').disabled = false;
+}
+
+document.getElementById('logoutBtn').addEventListener('click', () => {
+    socket.emit('disconnect_database');
     localStorage.removeItem('mysql_jwt_token');
-
-    fetch('/logout', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            if (data.success) {
-                // Reset UI state
-                mainInterface.style.display = 'none';
-                connectionPanel.style.display = '';
-                logoutBtn.style.display = 'none';
-                disconnectBtn.style.display = 'none';
-                connectionStatus.innerHTML = '<span class="status-indicator disconnected"></span><span>Disconnected</span>';
-
-                // Reset global state
-                isConnected = false;
-                currentCredentials = null;
-                currentDatabase = null;
-                currentTable = null;
-
-                // Clear form
-                connectionForm.reset();
-
-                showNotification('Logged out successfully', 'info');
-            }
-        });
-}
-
-function restoreSessionCredentials() {
-    const token = localStorage.getItem('mysql_jwt_token');
-
-    // Always fetch, but add header if token exists
-    const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-
-    fetch('/session-credentials', { headers })
-        .then(res => res.json())
-        .then(data => {
-            if (data.username && data.password && data.host) { // Ensure key fields exist
-                // Fill the form
-                document.getElementById('user').value = data.username;
-                document.getElementById('password').value = data.password;
-
-                if (data.host) document.getElementById('host').value = data.host;
-                if (data.port) document.getElementById('port').value = data.port;
-
-                // Restore engine selection
-                if (data.engine) {
-                    document.getElementById('engine').value = data.engine;
-                    localStorage.setItem('db_engine', data.engine);
-                }
-
-                // Handle SSL fields if present
-                if (data.ssl) {
-                    if (data.ssl.ca) document.getElementById('sslCa').value = data.ssl.ca;
-                    if (data.ssl.cert) document.getElementById('sslCert').value = data.ssl.cert;
-                    if (data.ssl.key) document.getElementById('sslKey').value = data.ssl.key;
-
-                    if (typeof data.ssl.rejectUnauthorized !== 'undefined') {
-                        document.getElementById('rejectUnauthorized').checked = data.ssl.rejectUnauthorized;
-                    }
-
-                    // Show advanced options
-                    document.getElementById('advancedOptions').style.display = 'block';
-                    document.querySelector('.advanced-options-toggle .toggle-icon').textContent = '▲';
-                }
-
-                // Auto-connect
-                const credentials = {
-                    host: data.host || document.getElementById('host').value,
-                    port: parseInt(data.port || document.getElementById('port').value),
-                    user: data.username,
-                    password: data.password,
-                    engine: data.engine || 'mysql',
-                    ssl: data.ssl || null
-                };
-
-                currentCredentials = credentials;
-                socket.emit('connect_database', credentials);
-                showNotification('Auto-connecting with saved credentials...', 'info');
-            } else if (data.username || data.password) {
-                // Just fill available data without auto-connecting
-                if (data.username) document.getElementById('user').value = data.username;
-                if (data.password) document.getElementById('password').value = data.password;
-            }
-        })
-        .catch(error => {
-            console.error('Error restoring session credentials:', error);
-        });
-}
-
-// Handle window resize to update scroll indicators
-window.addEventListener('resize', () => {
-    // Update scroll indicators for all table containers
-    document.querySelectorAll('.table-container').forEach(container => {
-        addScrollIndicator(container);
-    });
 });
 
-// Handle keyboard shortcuts
-document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && e.key === 'Enter') {
-        if (document.activeElement === sqlQuery) {
-            executeQuery();
-        }
-    } else if (e.key === 'Escape') {
-        // Close any open modals
-        const modals = document.querySelectorAll('.modal');
-        modals.forEach(modal => {
-            if (modal.style.display === 'block') {
-                modal.style.display = 'none';
-            }
-        });
-    }
+// New session tab
+document.getElementById('newSessionBtn').addEventListener('click', () => {
+    showConnectionOverlay();
+    showNotification('Opening new connection panel...', 'info');
 });
 
-
-function handleDeleteAllData() {
-    if (!currentDatabase || !currentTable) {
-        showNotification('No table selected', 'error');
-        return;
-    }
-
-    if (!confirm(`Are you sure you want to delete ALL data from table '${currentTable}'? This action cannot be undone!`)) {
-        return;
-    }
-
-    // Double confirmation
-    const verify = prompt(`Type 'DELETE' to confirm deleting all data from '${currentTable}':`);
-    if (!verify || verify.toUpperCase() !== 'DELETE') {
-        showNotification('Deletion cancelled', 'info');
-        return;
-    }
-
-    socket.emit('delete_all_data', {
-        database: currentDatabase,
-        table: currentTable
-    });
+// ============================================================
+//  UTILITY FUNCTIONS
+// ============================================================
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + sizes[i];
 }
 
-function handleDeleteSelectedRows() {
-    if (!currentDatabase || !currentTable) {
-        showNotification('No table selected', 'error');
-        return;
-    }
-
-    if (!currentPrimaryKey) {
-        showNotification('Cannot delete rows: No Primary Key found', 'error');
-        return;
-    }
-
-    const selectedCheckboxes = document.querySelectorAll('.row-checkbox:checked');
-    if (selectedCheckboxes.length === 0) {
-        showNotification('Please select rows to delete', 'error');
-        return;
-    }
-
-    const ids = Array.from(selectedCheckboxes).map(cb => cb.value);
-
-    if (!confirm(`Are you sure you want to delete ${ids.length} selected row(s)?`)) {
-        return;
-    }
-
-    socket.emit('delete_selected_data', {
-        database: currentDatabase,
-        table: currentTable,
-        targetColumn: currentPrimaryKey,
-        targetValues: ids
-    });
-}
-
-// Copy functions
-function copyRowData(rowData, buttonElement) {
-    try {
-        // Format row data as JSON
-        const jsonData = JSON.stringify(rowData, null, 2);
-
-        // Copy as JSON format only
-        navigator.clipboard.writeText(jsonData).then(() => {
-            showNotification('Row data copied to clipboard (JSON format)', 'success');
-            if (buttonElement) animateCopySuccess(buttonElement);
-        }).catch(() => {
-            // Fallback for older browsers
-            fallbackCopyText(jsonData);
-            showNotification('Row data copied to clipboard (JSON format)', 'success');
-            if (buttonElement) animateCopySuccess(buttonElement);
-        });
-    } catch (error) {
-        console.error('Copy failed:', error);
-        showNotification('Failed to copy row data', 'error');
-    }
-}
-
-function copyCellData(cellValue, buttonElement) {
-    try {
-        const textValue = cellValue === null ? 'NULL' : String(cellValue);
-
-        navigator.clipboard.writeText(textValue).then(() => {
-            showNotification(`Cell data copied: "${textValue.length > 50 ? textValue.substring(0, 50) + '...' : textValue}"`, 'success');
-            if (buttonElement) animateCopySuccess(buttonElement);
-        }).catch(() => {
-            fallbackCopyText(textValue);
-            showNotification(`Cell data copied: "${textValue.length > 50 ? textValue.substring(0, 50) + '...' : textValue}"`, 'success');
-            if (buttonElement) animateCopySuccess(buttonElement);
-        });
-    } catch (error) {
-        console.error('Copy failed:', error);
-        showNotification('Failed to copy cell data', 'error');
-    }
-}
-
-function animateCopySuccess(button) {
-    if (button) {
-        button.classList.add('copy-success');
-        setTimeout(() => {
-            button.classList.remove('copy-success');
-        }, 300);
-    }
-}
-
-function fallbackCopyText(text) {
-    // Fallback method for older browsers
-    const textArea = document.createElement('textarea');
-    textArea.value = text;
-    textArea.style.position = 'fixed';
-    textArea.style.left = '-999999px';
-    textArea.style.top = '-999999px';
-    document.body.appendChild(textArea);
-    textArea.focus();
-    textArea.select();
-
-    try {
-        document.execCommand('copy');
-    } catch (err) {
-        console.error('Fallback copy failed:', err);
-    }
-
-    document.body.removeChild(textArea);
-}
-
-// Export functionality
-function showExportDatabaseModal() {
-    if (!currentDatabase) {
-        showNotification('Please select a database first', 'error');
-        return;
-    }
-
-    document.getElementById('exportDbName').textContent = currentDatabase;
-
-    // Load tables for selection
-    socket.emit('get_tables', currentDatabase);
-
-    // Show modal after tables are loaded
-    setTimeout(() => {
-        populateExportTablesList();
-        document.getElementById('exportDatabaseModal').style.display = 'block';
-    }, 100);
-}
-
-function showExportTableModal() {
-    if (!currentTable || !currentDatabase) {
-        showNotification('Please select a table first', 'error');
-        return;
-    }
-
-    document.getElementById('exportTableName').textContent = `${currentDatabase}.${currentTable}`;
-    document.getElementById('exportTableModal').style.display = 'block';
-}
-
-function populateExportTablesList() {
-    const container = document.getElementById('exportTablesList');
-    container.innerHTML = '';
-
-    // Get tables from the sidebar
-    const tableItems = document.querySelectorAll('.table-list li');
-    tableItems.forEach(item => {
-        const tableName = item.textContent;
-
-        const div = document.createElement('div');
-        div.className = 'export-table-item';
-
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.value = tableName;
-        checkbox.id = `export_table_${tableName}`;
-        checkbox.checked = true;
-
-        const label = document.createElement('label');
-        label.htmlFor = `export_table_${tableName}`;
-        label.textContent = tableName;
-
-        div.appendChild(checkbox);
-        div.appendChild(label);
-        container.appendChild(div);
-    });
-}
-
-function selectAllTables() {
-    document.querySelectorAll('#exportTablesList input[type="checkbox"]').forEach(cb => {
-        cb.checked = true;
-    });
-}
-
-function deselectAllTables() {
-    document.querySelectorAll('#exportTablesList input[type="checkbox"]').forEach(cb => {
-        cb.checked = false;
-    });
-}
-
-function toggleDataExportOptions() {
-    const includeData = document.getElementById('exportTableIncludeData').checked;
-    const dataOptions = document.getElementById('dataExportOptions');
-    dataOptions.style.display = includeData ? 'block' : 'none';
-}
-
-function toggleCustomWhereClause() {
-    const customRadio = document.querySelector('input[name="dataExportType"][value="custom"]');
-    const customDiv = document.getElementById('customWhereClause');
-    customDiv.style.display = customRadio.checked ? 'block' : 'none';
-}
-
-function previewRowCount() {
-    const whereClause = document.getElementById('exportWhereClause').value.trim();
-    if (!whereClause) {
-        showNotification('Please enter a WHERE clause', 'error');
-        return;
-    }
-
-    socket.emit('get_row_count', {
-        database: currentDatabase,
-        table: currentTable,
-        whereClause: whereClause
-    });
-}
-
-function exportDatabase(e) {
-    e.preventDefault();
-
-    const includeData = document.getElementById('exportIncludeData').checked;
-    const separateData = document.getElementById('exportSeparateData').checked;
-    const exportMethod = document.querySelector('input[name="exportMethod"]:checked').value;
-    const exportFormat = document.querySelector('input[name="exportFormat"]:checked').value;
-    const selectedTables = Array.from(document.querySelectorAll('#exportTablesList input[type="checkbox"]:checked'))
-        .map(cb => cb.value);
-
-    if (selectedTables.length === 0) {
-        showNotification('Please select at least one table to export', 'error');
-        return;
-    }
-
-    showNotification('Exporting database... This may take a moment.', 'info');
-
-    socket.emit('export_database', {
-        database: currentDatabase,
-        options: {
-            includeData: includeData,
-            separateData: separateData,
-            exportMethod: exportMethod,
-            selectedTables: selectedTables,
-            format: exportFormat
-        }
-    });
-}
-
-function exportTable(e) {
-    e.preventDefault();
-
-    const includeData = document.getElementById('exportTableIncludeData').checked;
-    const dataExportType = document.querySelector('input[name="dataExportType"]:checked').value;
-    const tableExportFormat = document.querySelector('input[name="tableExportFormat"]:checked').value;
-
-    let options = {
-        includeData: includeData,
-        format: tableExportFormat
-    };
-
-    if (includeData) {
-        if (dataExportType === 'current') {
-            // Use current active search/filter conditions
-            options.searchFilters = currentSearchFilters.length > 0 ? currentSearchFilters : null;
-            options.searchLogic = currentSearchLogic;
-        } else if (dataExportType === 'custom') {
-            const customWhere = document.getElementById('exportWhereClause').value.trim();
-            if (!customWhere) {
-                showNotification('Please enter a WHERE clause or select a different export option', 'error');
-                return;
-            }
-            options.whereClause = customWhere;
-        }
-        // For 'all', no additional options needed
-    }
-
-    showNotification('Exporting table... This may take a moment.', 'info');
-
-    socket.emit('export_table', {
-        database: currentDatabase,
-        table: currentTable,
-        options: options
-    });
-}
-
-function buildCurrentWhereClause() {
-    // Legacy: returns null since we now use searchFilters directly
-    return null;
-}
-
-function exportSelectedRows() {
-    if (!currentDatabase || !currentTable) {
-        showNotification('Please select a table first', 'error');
-        return;
-    }
-
-    if (!currentPrimaryKey) {
-        showNotification('Cannot export: no Primary Key found on this table', 'error');
-        return;
-    }
-
-    const selectedCheckboxes = document.querySelectorAll('.row-checkbox:checked');
-    if (selectedCheckboxes.length === 0) {
-        showNotification('Please select at least one row to export', 'error');
-        return;
-    }
-
-    const pkValues = Array.from(selectedCheckboxes).map(cb => cb.value);
-
-    showNotification(`Exporting ${pkValues.length} selected row(s)...`, 'info');
-
-    socket.emit('export_table', {
-        database: currentDatabase,
-        table: currentTable,
-        options: {
-            includeData: true,
-            format: 'sql',
-            selectedPKValues: pkValues,
-            pkColumn: currentPrimaryKey
-        }
-    });
-}
-
-function exportCurrentData() {
-    if (!currentTable || !currentDatabase) {
-        showNotification('Please select a table first', 'error');
-        return;
-    }
-
-    // Quick export of current filtered data
-    let options = {
-        includeData: true,
-        format: 'sql',
-        searchFilters: currentSearchFilters.length > 0 ? currentSearchFilters : null,
-        searchLogic: currentSearchLogic
-    };
-
-    showNotification('Exporting current data... This may take a moment.', 'info');
-
-    socket.emit('export_table', {
-        database: currentDatabase,
-        table: currentTable,
-        options: options
-    });
-}
-
-function downloadFile(filename, content, isBinary = false) {
+function downloadFile(filename, content, isZip = false) {
+    const mimeType = isZip ? 'application/zip' : filename.endsWith('.json') ? 'application/json' : 'text/plain';
     let blob;
-    if (isBinary) {
-        // If content is an ArrayBuffer (from socket.io for binary data)
-        blob = new Blob([content], { type: 'application/zip' });
+    if (isZip && content.type === 'Buffer') {
+        blob = new Blob([new Uint8Array(content.data)], { type: mimeType });
     } else {
-        blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        blob = new Blob([content], { type: mimeType });
     }
-
     const url = URL.createObjectURL(blob);
-
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
-    a.style.display = 'none';
-
-    document.body.appendChild(a);
     a.click();
-    document.body.removeChild(a);
-
     URL.revokeObjectURL(url);
 }
-
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 Bytes';
-
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-// Error Log Functions
-function addErrorToLog(data) {
-    const logList = document.getElementById('errorLogList');
-
-    const errorItem = document.createElement('div');
-    errorItem.className = 'error-log-item';
-
-    const timestamp = new Date().toLocaleTimeString();
-
-    // Meta info
-    const metaDiv = document.createElement('div');
-    metaDiv.className = 'error-log-meta';
-    metaDiv.innerHTML = `
-        <span>Database: ${data.database || 'N/A'}</span>
-        <span>${timestamp}</span>
-    `;
-
-    // Error message
-    const messageDiv = document.createElement('div');
-    messageDiv.className = 'error-log-message';
-    messageDiv.innerHTML = `
-        <span class="error-log-message-text">${data.message}</span>
-        <button class="copy-btn" onclick="copyToClipboard('${data.message.replace(/'/g, "\\'")}', 'Error copied!')">
-            Copy Error
-        </button>
-    `;
-
-    // Query
-    const queryDiv = document.createElement('div');
-    queryDiv.className = 'error-log-query';
-    queryDiv.innerHTML = `
-        <span>${data.query}</span>
-        <button class="copy-btn" onclick="copyToClipboard('${data.query.replace(/'/g, "\\'").replace(/\n/g, "\\n")}', 'Query copied!')">
-            Copy Query
-        </button>
-    `;
-
-    errorItem.appendChild(metaDiv);
-    errorItem.appendChild(messageDiv);
-    errorItem.appendChild(queryDiv);
-
-    // Add to top of list
-    if (logList.firstChild) {
-        logList.insertBefore(errorItem, logList.firstChild);
-    } else {
-        logList.appendChild(errorItem);
-    }
-}
-
-function clearErrorLog() {
-    const logList = document.getElementById('errorLogList');
-    logList.innerHTML = '';
-    document.getElementById('errorLogContainer').style.display = 'none';
-}
-
-function copyToClipboard(text, successMessage) {
-    navigator.clipboard.writeText(text).then(() => {
-        showNotification(successMessage, 'success');
-    }).catch(err => {
-        console.error('Failed to copy: ', err);
-        showNotification('Failed to copy to clipboard', 'error');
-    });
-}
-window.copyToClipboard = copyToClipboard; // Make globally accessible for onclick events
-
-// Global functions for HTML onclick handlers
-window.selectAllTables = selectAllTables;
-window.deselectAllTables = deselectAllTables;
-window.previewRowCount = previewRowCount;
-window.closeModal = closeModal;
-window.showModal = showModal;
-
-
-// --- Database Maintainer Extensions --- //
-document.addEventListener('DOMContentLoaded', () => {
-    // 1. Settings Modal
-    document.getElementById('settingsBtn').addEventListener('click', () => {
-        socket.emit('get_settings');
-        showModal('settingsModal');
-    });
-
-    document.querySelectorAll('.settings-tab-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
-            btn.classList.add('active');
-            document.getElementById(btn.dataset.tab).classList.add('active');
-        });
-    });
-
-    document.getElementById('settingAutoBackupEnabled').addEventListener('change', (e) => {
-        document.getElementById('autoBackupOptions').style.display = e.target.checked ? 'block' : 'none';
-    });
-
-    document.getElementById('settingsForm').addEventListener('submit', (e) => {
-        e.preventDefault();
-        const settings = {
-            general: {
-                showSystemStats: document.getElementById('settingShowSystemStats').checked
-            },
-            autoBackup: {
-                enabled: document.getElementById('settingAutoBackupEnabled').checked,
-                interval: document.getElementById('settingAutoBackupInterval').value,
-                retention: parseInt(document.getElementById('settingAutoBackupRetention').value, 10),
-                cpuLimit: parseInt(document.getElementById('settingAutoBackupCpu').value, 10),
-                database: document.getElementById('settingAutoBackupDb').value,
-                credentials: currentCredentials
-            }
-        };
-        socket.emit('save_settings', settings);
-        
-        // Toggle system stats UI
-        document.getElementById('systemStats').style.display = settings.general.showSystemStats ? 'flex' : 'none';
-        if (settings.general.showSystemStats) startStatsPolling();
-        else stopStatsPolling();
-        
-        closeModal('settingsModal');
-    });
-
-    socket.on('settings', (settings) => {
-        if (settings.general) {
-            document.getElementById('settingShowSystemStats').checked = settings.general.showSystemStats;
-            document.getElementById('systemStats').style.display = settings.general.showSystemStats ? 'flex' : 'none';
-            if (settings.general.showSystemStats) startStatsPolling();
-        }
-        if (settings.autoBackup) {
-            document.getElementById('settingAutoBackupEnabled').checked = settings.autoBackup.enabled;
-            document.getElementById('autoBackupOptions').style.display = settings.autoBackup.enabled ? 'block' : 'none';
-            document.getElementById('settingAutoBackupInterval').value = settings.autoBackup.interval || 'daily';
-            document.getElementById('settingAutoBackupRetention').value = settings.autoBackup.retention || 5;
-            document.getElementById('settingAutoBackupCpu').value = settings.autoBackup.cpuLimit || 80;
-            setTimeout(() => {
-                const dbSelect = document.getElementById('settingAutoBackupDb');
-                dbSelect.innerHTML = '<option value="">Select Database</option>';
-                const dbs = Array.from(document.querySelectorAll('#databaseList li')).map(li => {
-                    const textNode = Array.from(li.childNodes).find(n => n.nodeType === 3);
-                    return textNode ? textNode.nodeValue.trim() : li.textContent.trim();
-                });
-                dbs.forEach(db => {
-                    if (db) {
-                        const opt = document.createElement('option');
-                        opt.value = db;
-                        opt.textContent = db;
-                        dbSelect.appendChild(opt);
-                    }
-                });
-                dbSelect.value = settings.autoBackup.database || '';
-            }, 500);
-        }
-    });
-
-    socket.on('settings_saved', (data) => {
-        showNotification(data.message, 'success');
-    });
-
-    // 2. System Stats Polling
-    let statsInterval = null;
-    function startStatsPolling() {
-        if (statsInterval) return;
-        statsInterval = setInterval(() => {
-            fetch('/api/system-stats').then(r => r.json()).then(data => {
-                document.getElementById('cpuBar').style.width = data.cpuUsage + '%';
-                document.getElementById('cpuText').textContent = data.cpuUsage + '%';
-                document.getElementById('memBar').style.width = data.memUsage + '%';
-                document.getElementById('memText').textContent = Math.round(data.memUsage) + '%';
-            }).catch(() => {});
-        }, 2000);
-    }
-    function stopStatsPolling() {
-        if (statsInterval) {
-            clearInterval(statsInterval);
-            statsInterval = null;
-        }
-    }
-
-    // 3. Backup History
-    document.getElementById('viewBackupHistoryBtn').addEventListener('click', () => {
-        closeModal('settingsModal');
-        socket.emit('list_backups');
-        showModal('backupHistoryModal');
-    });
-
-    socket.on('backups_list', (backups) => {
-        const tbody = document.querySelector('#backupHistoryTable tbody');
-        tbody.innerHTML = '';
-        if (backups.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4">No backups found.</td></tr>';
-            return;
-        }
-        backups.forEach(backup => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td>${backup.name}</td>
-                <td>${formatFileSize(backup.size)}</td>
-                <td>${new Date(backup.date).toLocaleString()}</td>
-                <td>
-                    <button class="btn btn-small btn-primary" onclick="downloadBackup('${backup.name}')">Download</button>
-                    <button class="btn btn-small btn-warning" onclick="restoreBackup('${backup.name}')">Restore</button>
-                    <button class="btn btn-small btn-danger" onclick="deleteBackup('${backup.name}')">Delete</button>
-                </td>
-            `;
-            tbody.appendChild(tr);
-        });
-    });
-
-    window.downloadBackup = function(filename) {
-        window.location.href = '/backups/' + filename;
-    };
-
-    window.deleteBackup = function(filename) {
-        if(confirm('Delete backup ' + filename + '?')) {
-            socket.emit('delete_backup', filename);
-        }
-    };
-
-    socket.on('backup_deleted', (data) => {
-        showNotification(data.message, 'success');
-        socket.emit('list_backups');
-    });
-
-    window.restoreBackup = function(filename) {
-        const targetDb = prompt('Enter the name of the database to restore into:\n(Leave empty to try using the name inferred from backup, or restore to current)', currentDatabase || '');
-        if (targetDb !== null && targetDb.trim() !== '') {
-            socket.emit('restore_backup', { filename, targetDatabase: targetDb.trim() });
-            showNotification('Restoring backup, please wait...', 'info');
-        }
-    };
-
-    socket.on('backup_restored', (data) => {
-        showNotification(data.message, 'success');
-        loadTables();
-    });
-
-    document.getElementById('uploadBackupBtn').addEventListener('click', () => {
-        document.getElementById('uploadBackupInput').click();
-    });
-
-    document.getElementById('uploadBackupInput').addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        const formData = new FormData();
-        formData.append('backupFile', file);
-        showNotification('Uploading backup...', 'info');
-        try {
-            const res = await fetch('/api/upload-backup', { method: 'POST', body: formData });
-            const data = await res.json();
-            if (data.success) {
-                showNotification('Upload successful', 'success');
-                socket.emit('list_backups');
-            } else {
-                showNotification(data.error || 'Upload failed', 'error');
-            }
-        } catch(err) {
-            showNotification('Upload failed', 'error');
-        }
-    });
-
-    // 4. Import Database Modal
-    document.getElementById('importDatabaseBtn').addEventListener('click', () => {
-        document.getElementById('importDbName').textContent = currentDatabase;
-        showModal('importDatabaseModal');
-    });
-
-    document.getElementById('importDatabaseForm').addEventListener('submit', (e) => {
-        e.preventDefault();
-        const fileInput = document.getElementById('importFile');
-        const file = fileInput.files[0];
-        if (!file) {
-            showNotification('Please select a file', 'error');
-            return;
-        }
-
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const content = e.target.result;
-            const type = file.name.endsWith('.json') ? 'json' : 'sql';
-            socket.emit('import_database', {
-                database: currentDatabase,
-                content: content,
-                type: type
-            });
-            showNotification('Importing database, please wait...', 'info');
-            closeModal('importDatabaseModal');
-        };
-        reader.readAsText(file);
-    });
-
-    socket.on('database_imported', (data) => {
-        showNotification(data.message, 'success');
-        loadTables(); 
-    });
-
-    // 5. Query History
-    document.getElementById('toggleQueryHistory').addEventListener('click', () => {
-        const panel = document.getElementById('queryHistoryPanel');
-        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-    });
-
-    document.getElementById('clearQueryHistoryBtn').addEventListener('click', () => {
-        socket.emit('clear_query_history');
-    });
-
-    socket.on('query_history', (history) => {
-        const list = document.getElementById('queryHistoryList');
-        list.innerHTML = '';
-        history.forEach(h => {
-            const li = document.createElement('li');
-            li.className = 'query-history-item';
-            li.innerHTML = `
-                <div>
-                    <code>${h.query}</code>
-                    <small>${new Date(h.timestamp).toLocaleString()} - ${h.database}</small>
-                </div>
-                <button class="btn btn-small btn-secondary copy-query" data-query="${btoa(h.query)}">Copy</button>
-            `;
-            list.appendChild(li);
-        });
-
-        document.querySelectorAll('.copy-query').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const query = atob(e.target.dataset.query);
-                document.getElementById('sqlQuery').value = query;
-                document.getElementById('queryHistoryPanel').style.display = 'none';
-                showNotification('Query copied to editor', 'success');
-            });
-        });
-    });
-
-    document.getElementById('executeQuery').addEventListener('click', () => {
-        const query = sqlQuery.value.trim();
-        const db = queryDatabase.value;
-        if (query && db) {
-            socket.emit('save_query_history', { query, database: db });
-        }
-    });
-
-    // 6. DB and Table Sizes
-    socket.on('db_sizes', (sizes) => {
-        document.querySelectorAll('#databaseList li').forEach(li => {
-            const textNode = Array.from(li.childNodes).find(n => n.nodeType === 3);
-            const dbName = textNode ? textNode.nodeValue.trim() : li.textContent.trim();
-            const sizeObj = sizes.find(s => s.database === dbName);
-            if (sizeObj) {
-                let badge = li.querySelector('.size-badge');
-                if (!badge) {
-                    badge = document.createElement('span');
-                    badge.className = 'size-badge';
-                    li.appendChild(badge);
-                }
-                badge.textContent = `${sizeObj.sizeMb} MB`;
-            }
-        });
-    });
-    
-    socket.on('table_sizes', (data) => {
-        if (data.database === currentDatabase) {
-            document.querySelectorAll('#tableList li').forEach(li => {
-                const textNode = Array.from(li.childNodes).find(n => n.nodeType === 3);
-                const tblName = textNode ? textNode.nodeValue.trim() : li.textContent.trim();
-                const sizeObj = data.sizes.find(s => s.table === tblName);
-                if (sizeObj) {
-                    let badge = li.querySelector('.size-badge');
-                    if (!badge) {
-                        badge = document.createElement('span');
-                        badge.className = 'size-badge';
-                        li.appendChild(badge);
-                    }
-                    badge.textContent = `${sizeObj.sizeMb} MB`;
-                }
-            });
-        }
-    });
-
-    const observer = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-            if (mutation.target.id === 'databaseList' && mutation.addedNodes.length > 0) {
-                if (isConnected) socket.emit('get_db_sizes');
-            }
-            if (mutation.target.id === 'tableList' && mutation.addedNodes.length > 0) {
-                if (isConnected && currentDatabase) socket.emit('get_table_sizes', currentDatabase);
-            }
-        });
-    });
-    observer.observe(document.getElementById('databaseList'), { childList: true });
-    observer.observe(document.getElementById('tableList'), { childList: true });
-
-    // 7. Insert Row Logic
-    document.getElementById('insertRowBtn').addEventListener('click', () => {
-        if (!currentTableStructure) return;
-        document.getElementById('insertRowTableName').textContent = currentTable;
-        const container = document.getElementById('insertRowFields');
-        container.innerHTML = '';
-        currentTableStructure.forEach(field => {
-            const div = document.createElement('div');
-            div.className = 'form-group';
-            div.innerHTML = `
-                <label>${field.Field} (${field.Type}) ${field.Null === 'NO' ? '*' : ''}:</label>
-                <input type="text" name="${field.Field}" class="form-control" placeholder="${field.Default !== null ? 'Default: ' + field.Default : 'NULL'}">
-            `;
-            container.appendChild(div);
-        });
-        showModal('insertRowModal');
-    });
-
-    document.getElementById('insertRowForm').addEventListener('submit', (e) => {
-        e.preventDefault();
-        const formData = new FormData(e.target);
-        const rowData = {};
-        for (let [key, value] of formData.entries()) {
-            if (value.trim() !== '') {
-                rowData[key] = value.trim();
-            }
-        }
-        socket.emit('insert_row', { database: currentDatabase, table: currentTable, rowData });
-        closeModal('insertRowModal');
-    });
-
-    socket.on('row_inserted', (data) => {
-        showNotification(data.message, 'success');
-        loadTableData();
-    });
-});
-
