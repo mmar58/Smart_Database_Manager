@@ -440,9 +440,16 @@ body {
     border-radius: 0;
     transition: background var(--transition);
     position: relative;
+    flex-wrap: wrap;
 }
 .db-node-header:hover { background: var(--bg-sidebar-hover); }
-.db-node-header:hover .db-actions { opacity: 1; }
+.db-node-header:hover .db-actions { 
+    opacity: 1; 
+    max-height: 40px;
+    margin-top: 2px;
+    padding-top: 4px;
+    border-top: 1px dashed var(--border-sidebar);
+}
 .db-node-header.active { background: var(--bg-sidebar-active); }
 
 .db-chevron {
@@ -479,8 +486,14 @@ body {
     display: flex;
     gap: 2px;
     opacity: 0;
-    transition: opacity var(--transition);
-    flex-shrink: 0;
+    transition: all var(--transition);
+    flex-basis: 100%;
+    justify-content: flex-end;
+    max-height: 0;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    border-top: 1px dashed transparent;
 }
 
 .db-action-btn {
@@ -514,9 +527,16 @@ body {
     cursor: pointer;
     transition: background var(--transition);
     position: relative;
+    flex-wrap: wrap;
 }
 .table-node:hover { background: var(--bg-sidebar-hover); }
-.table-node:hover .table-actions { opacity: 1; }
+.table-node:hover .table-actions {
+    opacity: 1;
+    max-height: 40px;
+    margin-top: 2px;
+    padding-top: 4px;
+    border-top: 1px dashed var(--border-sidebar);
+}
 .table-node.active { background: var(--bg-sidebar-active); }
 .table-node.active .table-icon { color: var(--accent); }
 
@@ -544,8 +564,14 @@ body {
     display: flex;
     gap: 2px;
     opacity: 0;
-    transition: opacity var(--transition);
-    flex-shrink: 0;
+    transition: all var(--transition);
+    flex-basis: 100%;
+    justify-content: flex-end;
+    max-height: 0;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    border-top: 1px dashed transparent;
 }
 .table-action-btn {
     width: 18px;

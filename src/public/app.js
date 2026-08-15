@@ -872,14 +872,14 @@ function renderTableData({ data, total, limit, offset }) {
             ${cols.map(c => {
                 const val = row[c];
                 if (val === null) return `<td><span class="null-value">NULL</span></td>`;
-                const str = String(val);
+                const str = typeof val === 'object' ? JSON.stringify(val) : String(val);
                 if (str.length > 100) return `<td class="long-value" title="${escapeHtml(str)}">${escapeHtml(str.slice(0, 80))}…</td>`;
                 return `<td>${escapeHtml(str)}</td>`;
             }).join('')}
             <td>
                 <div class="row-actions-cell">
-                    <button class="btn btn-primary btn-sm row-action-btn" onclick="openEditRowModal(${JSON.stringify(JSON.stringify(row))})">Edit</button>
-                    <button class="btn btn-danger btn-sm row-action-btn" onclick="deleteRow(${JSON.stringify(JSON.stringify(row))})">Del</button>
+                    <button class="btn btn-primary btn-sm row-action-btn" onclick="openEditRowModal(${i})">Edit</button>
+                    <button class="btn btn-danger btn-sm row-action-btn" onclick="deleteRow(${i})">Del</button>
                 </div>
             </td>
         </tr>
@@ -1174,8 +1174,8 @@ document.getElementById('clearSearchBtn').addEventListener('click', () => {
 // ============================================================
 //  ROW EDIT / INSERT / DELETE
 // ============================================================
-window.openEditRowModal = function(rowJson) {
-    const row = JSON.parse(rowJson);
+window.openEditRowModal = function(index) {
+    const row = window._rowData[index];
     const fields = document.getElementById('editRowFields');
     fields.innerHTML = Object.entries(row).map(([key, val]) => `
         <div class="form-group">
@@ -1201,8 +1201,8 @@ window.openEditRowModal = function(rowJson) {
     showModal('modalEditRow');
 };
 
-window.deleteRow = function(rowJson) {
-    const row = JSON.parse(rowJson);
+window.deleteRow = function(index) {
+    const row = window._rowData[index];
     if (!confirm('Delete this row?')) return;
     let pkCol = Object.keys(row)[0];
     if (currentTableStructure) {
@@ -2040,7 +2040,7 @@ function renderSlowQueries(queries, warning) {
                         <td>${q.execCount}</td>
                         <td class="text-muted">${q.rows}</td>
                         <td>
-                            <button class="btn btn-ghost btn-sm" onclick="copyQueryToEditor(${JSON.stringify(JSON.stringify(q.query))})">Copy</button>
+                            <button class="btn btn-ghost btn-sm" data-query="${escapeHtml(q.query)}" onclick="copyQueryToEditor(this.dataset.query)">Copy</button>
                         </td>
                     </tr>
                 `).join('')}
@@ -2048,8 +2048,7 @@ function renderSlowQueries(queries, warning) {
         </table>`;
 }
 
-window.copyQueryToEditor = function(qJson) {
-    const query = JSON.parse(qJson);
+window.copyQueryToEditor = function(query) {
     if (sqlEditor) sqlEditor.setValue(query);
     switchContentTab('query');
     showNotification('Query copied to SQL editor', 'success');
