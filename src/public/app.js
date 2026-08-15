@@ -26,6 +26,131 @@ let settings = {};
 let backupProfiles = [];
 let sqlEditor = null; // CodeMirror instance
 
+document.addEventListener('DOMContentLoaded', () => {
+    // Fetch and display current IP
+    fetch('/api/my-ip').then(r => r.json()).then(data => {
+        if (data.ip) document.getElementById('currentUserIp').textContent = data.ip;
+    }).catch(() => {});
+
+    // Save connection options toggle
+    const saveConnection = document.getElementById('saveConnection');
+    const saveOptionsSection = document.getElementById('saveOptionsSection');
+    if (saveConnection) {
+        saveConnection.addEventListener('change', (e) => {
+            saveOptionsSection.style.display = e.target.checked ? 'block' : 'none';
+        });
+    }
+
+    const saveLocationRadios = document.querySelectorAll('input[name="saveLocation"]');
+    const serverRestrictionSection = document.getElementById('serverRestrictionSection');
+    saveLocationRadios.forEach(r => r.addEventListener('change', (e) => {
+        serverRestrictionSection.style.display = e.target.value === 'server' ? 'block' : 'none';
+    }));
+
+    const ipRestrictionRadios = document.querySelectorAll('input[name="ipRestriction"]');
+    const selectedIpsInput = document.getElementById('selectedIpsInput');
+    ipRestrictionRadios.forEach(r => r.addEventListener('change', (e) => {
+        selectedIpsInput.style.display = e.target.value === 'selected' ? 'block' : 'none';
+    }));
+
+    // Manage Connections Buttons
+    const manageConnectionsBtn = document.getElementById('manageConnectionsBtn');
+    if (manageConnectionsBtn) {
+        manageConnectionsBtn.addEventListener('click', openManageConnectionsModal);
+    }
+    const appShellManageConnectionsBtn = document.getElementById('appShellManageConnectionsBtn');
+    if (appShellManageConnectionsBtn) {
+        appShellManageConnectionsBtn.addEventListener('click', openManageConnectionsModal);
+    }
+});
+
+function openManageConnectionsModal() {
+    renderManageConnectionsTable();
+    showModal('modalManageConnections');
+}
+
+function renderManageConnectionsTable() {
+    const tbody = document.getElementById('manageConnectionsTbody');
+    if (!tbody) return;
+    const allSaved = window._allSavedConnections || [];
+    tbody.innerHTML = allSaved.map((c, i) => `
+        <tr>
+            <td>${escapeHtml(c.host)}:${c.port}</td>
+            <td>${escapeHtml(c.user)}</td>
+            <td>${c._location === 'server' ? '🌐 Server' : '💾 Local'}</td>
+            <td>${c._location === 'server' ? (c.ipRestriction || 'current') : 'N/A'}</td>
+            <td>
+                <button class="btn btn-secondary btn-sm" onclick="editSavedConnection(${i})">Edit</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteSavedConnection(${i})">Delete</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+window.deleteSavedConnection = async function(idx) {
+    if (!confirm('Are you sure you want to delete this connection?')) return;
+    const allSaved = window._allSavedConnections || [];
+    const conn = allSaved[idx];
+    if (!conn) return;
+
+    if (conn._location === 'local') {
+        let savedLocal = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+        // Find exact match in local storage
+        const localIdx = savedLocal.findIndex(s => s.host === conn.host && s.port === conn.port && s.user === conn.user);
+        if (localIdx >= 0) {
+            savedLocal.splice(localIdx, 1);
+            localStorage.setItem('savedConnections', JSON.stringify(savedLocal));
+        }
+    } else {
+        await fetch(`/api/connections/delete?id=${encodeURIComponent(conn._id)}`, { method: 'DELETE' });
+    }
+    await loadSavedConnections();
+    renderManageConnectionsTable();
+    showNotification('Connection deleted');
+};
+
+window.editSavedConnection = function(idx) {
+    const allSaved = window._allSavedConnections || [];
+    const conn = allSaved[idx];
+    if (!conn) return;
+    hideModal('modalManageConnections');
+    
+    // Auto-fill connection form with this connection's data
+    populateConnectionForm(conn);
+    if (conn.password) {
+        document.getElementById('password').value = conn.password;
+    }
+    if (conn.ssl) {
+        document.getElementById('advancedSection').classList.add('open');
+        document.getElementById('sslCa').value = conn.ssl.ca || '';
+        document.getElementById('sslCert').value = conn.ssl.cert || '';
+        document.getElementById('sslKey').value = conn.ssl.key || '';
+        document.getElementById('rejectUnauthorized').checked = conn.ssl.rejectUnauthorized !== false;
+    }
+    
+    // Open save options
+    document.getElementById('saveConnection').checked = true;
+    document.getElementById('saveOptionsSection').style.display = 'block';
+    
+    if (conn._location === 'server') {
+        document.querySelector('input[name="saveLocation"][value="server"]').checked = true;
+        document.getElementById('serverRestrictionSection').style.display = 'block';
+        if (conn.ipRestriction) {
+            document.querySelector(`input[name="ipRestriction"][value="${conn.ipRestriction}"]`).checked = true;
+            if (conn.ipRestriction === 'selected') {
+                document.getElementById('selectedIpsInput').style.display = 'block';
+                document.getElementById('selectedIps').value = (conn.selectedIps || []).join(', ');
+            } else {
+                document.getElementById('selectedIpsInput').style.display = 'none';
+            }
+        }
+    } else {
+        document.querySelector('input[name="saveLocation"][value="local"]').checked = true;
+        document.getElementById('serverRestrictionSection').style.display = 'none';
+    }
+    showNotification('Editing connection... save when done.');
+};
+
 // ============================================================
 //  THEME
 // ============================================================
@@ -103,6 +228,8 @@ function closeModal(id) {
     if (form) form.reset();
 }
 window.closeModal = closeModal;
+// hideModal is an alias for closeModal
+window.hideModal = closeModal;
 
 // Close on overlay click
 document.addEventListener('click', e => {
@@ -205,7 +332,8 @@ document.getElementById('advancedToggle').addEventListener('click', () => {
 // Load saved connections on page load
 loadSavedConnections();
 
-function loadSavedConnections() {
+async function loadSavedConnections() {
+    console.log('[loadSavedConnections] Loading saved connections...');
     const token = localStorage.getItem('mysql_jwt_token');
     if (token) {
         fetch('/session-credentials', { headers: { 'Authorization': 'Bearer ' + token } })
@@ -215,35 +343,53 @@ function loadSavedConnections() {
             }).catch(() => {});
     }
 
-    const saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+    const savedLocal = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+    let savedServer = [];
+    try {
+        const res = await fetch('/api/connections/list');
+        const data = await res.json();
+        if (data.connections) {
+            savedServer = Object.keys(data.connections).map(id => ({ ...data.connections[id], _id: id, _location: 'server' }));
+        }
+    } catch {}
+
+    const allSaved = [...savedLocal.map(c => ({...c, _location: 'local'})), ...savedServer];
+    window._allSavedConnections = allSaved; // Store for manage modal
+
     const wrapper = document.getElementById('savedConnsWrapper');
     const select = document.getElementById('savedConnections');
-    if (saved.length > 0) {
+    if (allSaved.length > 0) {
         wrapper.style.display = 'block';
         select.innerHTML = '<option value="">Select a saved connection...</option>';
-        saved.forEach((c, i) => {
+        allSaved.forEach((c, i) => {
             const opt = document.createElement('option');
             opt.value = i;
-            opt.textContent = `${c.user}@${c.host}:${c.port} (${c.engine || 'mysql'})`;
+            opt.textContent = `${c.user}@${c.host}:${c.port} (${c.engine || 'mysql'}) [${c._location}]`;
             select.appendChild(opt);
         });
+    } else {
+        wrapper.style.display = 'none';
     }
 }
 
 document.getElementById('savedConnections').addEventListener('change', async (e) => {
     const idx = parseInt(e.target.value);
     if (isNaN(idx)) return;
-    const saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
-    const conn = saved[idx];
+    const allSaved = window._allSavedConnections || [];
+    const conn = allSaved[idx];
     if (!conn) return;
     populateConnectionForm(conn);
-    // Retrieve password from secure store
-    const credKey = `${conn.host}:${conn.port}:${conn.user}`;
-    try {
-        const res = await fetch(`/api/credential/get?key=${encodeURIComponent(credKey)}`);
-        const data = await res.json();
-        if (data.password) document.getElementById('password').value = data.password;
-    } catch {}
+    if (conn.password) {
+        document.getElementById('password').value = conn.password;
+    }
+    // Also restore SSL config
+    if (conn.ssl) {
+        document.getElementById('advancedSection').classList.add('open');
+        document.getElementById('sslCa').value = conn.ssl.ca || '';
+        document.getElementById('sslCert').value = conn.ssl.cert || '';
+        document.getElementById('sslKey').value = conn.ssl.key || '';
+        document.getElementById('rejectUnauthorized').checked = conn.ssl.rejectUnauthorized !== false;
+    }
 });
 
 function populateConnectionForm(data) {
@@ -258,24 +404,11 @@ function populateConnectionForm(data) {
     }
 }
 
-document.getElementById('deleteSavedConnBtn').addEventListener('click', () => {
-    const select = document.getElementById('savedConnections');
-    const idx = parseInt(select.value);
-    if (isNaN(idx)) return;
-    let saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
-    const conn = saved[idx];
-    if (conn) {
-        const credKey = `${conn.host}:${conn.port}:${conn.user}`;
-        fetch('/api/credential/delete?key=' + encodeURIComponent(credKey), { method: 'DELETE' }).catch(() => {});
-    }
-    saved.splice(idx, 1);
-    localStorage.setItem('savedConnections', JSON.stringify(saved));
-    loadSavedConnections();
-    showNotification('Connection deleted', 'success');
-});
+// The deleteSavedConnBtn listener was removed as it's now handled by Manage modal
 
 // Connection form submit
 document.getElementById('connectionForm').addEventListener('submit', async (e) => {
+    console.log('[connectionForm] Submit triggered');
     e.preventDefault();
     const formData = new FormData(e.target);
     const creds = {
@@ -291,20 +424,29 @@ document.getElementById('connectionForm').addEventListener('submit', async (e) =
 
     const saveConn = document.getElementById('saveConnection').checked;
     if (saveConn) {
-        const credKey = `${creds.host}:${creds.port}:${creds.user}`;
-        // Store password encrypted on server
-        await fetch('/api/credential/set', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: credKey, password: creds.password })
-        }).catch(() => {});
-        // Save non-sensitive data in localStorage
-        let saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
-        const exists = saved.findIndex(s => s.host === creds.host && s.port === creds.port && s.user === creds.user);
-        const connData = { host: creds.host, port: creds.port, user: creds.user, database: creds.database, engine: creds.engine };
-        if (exists >= 0) saved[exists] = connData;
-        else saved.unshift(connData);
-        localStorage.setItem('savedConnections', JSON.stringify(saved.slice(0, 20)));
+        const saveLocation = document.querySelector('input[name="saveLocation"]:checked').value;
+        const ipRestriction = document.querySelector('input[name="ipRestriction"]:checked').value;
+        const selectedIps = document.getElementById('selectedIps').value.split(',').map(s => s.trim()).filter(s => s);
+        
+        const connData = { ...creds, timestamp: Date.now() };
+
+        if (saveLocation === 'local') {
+            let saved = JSON.parse(localStorage.getItem('savedConnections') || '[]');
+            const exists = saved.findIndex(s => s.host === creds.host && s.port === creds.port && s.user === creds.user);
+            if (exists >= 0) saved[exists] = connData;
+            else saved.unshift(connData);
+            localStorage.setItem('savedConnections', JSON.stringify(saved.slice(0, 20)));
+        } else {
+            connData.ipRestriction = ipRestriction;
+            connData.selectedIps = selectedIps;
+            connData.savedIp = document.getElementById('currentUserIp').textContent;
+            const credKey = `${creds.host}:${creds.port}:${creds.user}`;
+            await fetch('/api/connections/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: credKey, connection: connData })
+            }).catch(() => {});
+        }
     }
 
     socket.emit('connect_database', creds);
@@ -329,11 +471,22 @@ function buildSslConfig(formData) {
 // ============================================================
 //  SOCKET LISTENERS
 // ============================================================
+
+// Handle socket.io transport reconnect — re-send DB credentials automatically
+socket.on('connect', () => {
+    console.log('[Socket] Connected/Reconnected with id:', socket.id);
+    if (isConnected && currentCredentials) {
+        console.log('[Socket] Was previously connected — re-emitting connect_database');
+        socket.emit('connect_database', currentCredentials);
+    }
+});
+
 socket.on('connection_success', () => {
     isConnected = true;
     updateConnectionStatus(true);
     showNotification('Connected to database!', 'success');
     showAppShell();
+    console.log('[Socket] connection_success — showing app shell');
 
     // Store JWT (without password)
     fetch('/store-credentials', {
@@ -368,13 +521,16 @@ socket.on('connection_success', () => {
 });
 
 socket.on('connection_error', (data) => {
+    console.error('[Socket] connection_error:', data);
     showNotification(data.message || 'Connection failed', 'error');
     document.getElementById('connectBtn').textContent = 'Connect to Database';
     document.getElementById('connectBtn').disabled = false;
 });
 
 socket.on('disconnection_success', () => {
+    console.log('[Socket] disconnection_success — intentional logout');
     isConnected = false;
+    currentCredentials = null;
     currentDatabase = null;
     currentTable = null;
     updateConnectionStatus(false);
@@ -382,6 +538,21 @@ socket.on('disconnection_success', () => {
     showConnectionOverlay();
     clearSidebar();
     stopStatsPolling();
+});
+
+// Transport-level disconnect (network drop, tab sleep, etc.)
+socket.on('disconnect', (reason) => {
+    console.warn('[Socket] Transport disconnected. Reason:', reason);
+    // Only show overlay if it was an intentional server-side disconnect
+    // Socket.io will automatically reconnect for transport errors
+    if (reason === 'io server disconnect') {
+        // The server forcibly disconnected — treat as logout
+        isConnected = false;
+        currentCredentials = null;
+        showConnectionOverlay();
+    }
+    // For all other reasons (transport close, ping timeout, etc.) socket.io
+    // will reconnect automatically and the 'connect' handler above re-sends creds
 });
 
 socket.on('error', data => showNotification(data.message, 'error'));
@@ -1187,7 +1358,7 @@ window.openEditRowModal = function(index) {
     document.getElementById('editRowForm').onsubmit = (e) => {
         e.preventDefault();
         const updateData = {};
-        new FormData(e.target).forEach((val, key) => { updateData[key] = val; });
+        new FormData(e.target).forEach((val, key) => { updateData[key] = val === '' ? null : val; });
         // Find PK
         let pkCol = null, pkVal = null;
         if (currentTableStructure) {

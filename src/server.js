@@ -49,11 +49,12 @@ app.get('/', (req, res) => {
 });
 
 // --- File paths ---
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.join(__dirname, '..', 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const QUERY_HISTORY_FILE = path.join(DATA_DIR, 'query_history.json');
 const ANNOTATIONS_FILE = path.join(DATA_DIR, 'annotations.json');
 const CREDS_FILE = path.join(DATA_DIR, 'credentials.enc');
+const SERVER_CONNECTIONS_FILE = path.join(DATA_DIR, 'server_connections.enc');
 const SALT_FILE = path.join(DATA_DIR, '.salt');
 const BACKUPS_DIR = path.join(__dirname, '..', 'backups');
 
@@ -121,6 +122,96 @@ async function deleteSecureCredential(key) {
     delete creds[key];
     await fs.writeFile(CREDS_FILE, JSON.stringify(creds));
 }
+
+// Helper function to get client IP
+function getClientIp(req) {
+    return req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
+}
+
+app.get('/api/my-ip', (req, res) => {
+    res.json({ ip: getClientIp(req) });
+});
+
+async function loadServerConnections() {
+    if (!fsSync.existsSync(SERVER_CONNECTIONS_FILE)) return {};
+    try {
+        const encrypted = await fs.readFile(SERVER_CONNECTIONS_FILE, 'utf8');
+        if (!encrypted) return {};
+        const decrypted = decryptSecret(encrypted);
+        return JSON.parse(decrypted);
+    } catch {
+        return {};
+    }
+}
+
+async function saveServerConnections(connections) {
+    const encrypted = encryptSecret(JSON.stringify(connections));
+    await fs.writeFile(SERVER_CONNECTIONS_FILE, encrypted);
+}
+
+app.post('/api/connections/save', async (req, res) => {
+    try {
+        const { id, connection } = req.body;
+        if (!id || !connection) return res.status(400).json({ error: 'Missing id or connection' });
+        const connections = await loadServerConnections();
+        connections[id] = connection;
+        await saveServerConnections(connections);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/connections/list', async (req, res) => {
+    try {
+        const clientIp = getClientIp(req);
+        const connections = await loadServerConnections();
+        const authorizedConnections = {};
+        for (const [id, conn] of Object.entries(connections)) {
+            const restriction = conn.ipRestriction;
+            if (restriction === 'all') {
+                authorizedConnections[id] = conn;
+            } else if (restriction === 'current' && conn.savedIp === clientIp) {
+                authorizedConnections[id] = conn;
+            } else if (restriction === 'selected' && (conn.selectedIps || []).includes(clientIp)) {
+                authorizedConnections[id] = conn;
+            }
+        }
+        res.json({ connections: authorizedConnections });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/connections/delete', async (req, res) => {
+    try {
+        const { id } = req.query;
+        if (!id) return res.status(400).json({ error: 'Missing id' });
+        const connections = await loadServerConnections();
+        if (connections[id]) {
+            delete connections[id];
+            await saveServerConnections(connections);
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/connections/edit', async (req, res) => {
+    try {
+        const { id, connection } = req.body;
+        if (!id || !connection) return res.status(400).json({ error: 'Missing id or connection' });
+        const connections = await loadServerConnections();
+        if (connections[id]) {
+            connections[id] = { ...connections[id], ...connection };
+            await saveServerConnections(connections);
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // Credential REST endpoints
 app.post('/api/credential/set', async (req, res) => {
@@ -234,12 +325,15 @@ io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
 
     socket.on('connect_database', async (credentials) => {
+        console.log(`[connect_database] socket=${socket.id} host=${credentials.host} engine=${credentials.engine}`);
         try {
             const dbManager = new DatabaseManager(credentials);
             await dbManager.connect();
             activeConnections.set(socket.id, dbManager);
+            console.log(`[connect_database] SUCCESS socket=${socket.id}`);
             socket.emit('connection_success', { message: 'Connected to database', connectionId: socket.id });
         } catch (error) {
+            console.error(`[connect_database] FAILED socket=${socket.id}:`, error.message);
             socket.emit('connection_error', { message: 'Failed to connect', error: error.message });
         }
     });

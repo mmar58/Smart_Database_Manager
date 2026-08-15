@@ -33,7 +33,7 @@
                 <label>Saved Connections</label>
                 <div style="display:flex;gap:8px;">
                     <select class="form-control" id="savedConnections" style="flex:1;"></select>
-                    <button type="button" class="btn btn-danger btn-icon" id="deleteSavedConnBtn" title="Delete saved connection">✕</button>
+                    <button type="button" class="btn btn-secondary" id="manageConnectionsBtn" title="Manage saved connections">⚙️ Manage</button>
                 </div>
             </div>
         </div>
@@ -106,8 +106,32 @@
             <div class="form-group" style="margin-top:4px;">
                 <label class="checkbox-label">
                     <input type="checkbox" id="saveConnection" name="saveConnection">
-                    Save connection (stores password encrypted)
+                    Save connection
                 </label>
+            </div>
+
+            <div id="saveOptionsSection" style="display:none; margin-left: 20px; border-left: 2px solid var(--border-color); padding-left: 10px; margin-bottom: 10px;">
+                <div class="form-group">
+                    <label>Save Location</label>
+                    <div style="display:flex;gap:10px;">
+                        <label class="checkbox-label"><input type="radio" name="saveLocation" value="local" checked> Local Storage</label>
+                        <label class="checkbox-label"><input type="radio" name="saveLocation" value="server"> Server</label>
+                    </div>
+                </div>
+
+                <div id="serverRestrictionSection" style="display:none;">
+                    <div class="form-group">
+                        <label>IP Restriction <span style="font-size: 0.85em; color: var(--text-muted);">(Your IP: <span id="currentUserIp">Loading...</span>)</span></label>
+                        <div style="display:flex;flex-direction:column;gap:5px;">
+                            <label class="checkbox-label"><input type="radio" name="ipRestriction" value="current" checked> Current IP Only</label>
+                            <label class="checkbox-label"><input type="radio" name="ipRestriction" value="all"> All IPs</label>
+                            <label class="checkbox-label"><input type="radio" name="ipRestriction" value="selected"> Selected IPs</label>
+                        </div>
+                    </div>
+                    <div class="form-group" id="selectedIpsInput" style="display:none; margin-top: 5px;">
+                        <input class="form-control" type="text" id="selectedIps" name="selectedIps" placeholder="Comma-separated IPs (e.g., 192.168.1.1, 10.0.0.5)">
+                    </div>
+                </div>
             </div>
 
             <div class="form-group" style="margin-top:16px;">
@@ -138,6 +162,7 @@
             <!-- tabs rendered by JS -->
         </div>
         <button class="session-tab-new" id="newSessionBtn" title="New connection tab">＋ New</button>
+        <button class="btn btn-secondary btn-sm" id="appShellManageConnectionsBtn" style="margin-left:auto; margin-right:15px;">⚙️ Manage Connections</button>
 
         <!-- Right controls -->
         <div class="header-controls">
@@ -1087,6 +1112,31 @@
         <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-close="modalAddProfile">Cancel</button>
             <button type="button" class="btn btn-primary" id="saveProfileBtn">Save Profile</button>
+        </div>
+    </div>
+</div>
+<!-- Manage Connections Modal -->
+<div class="modal" id="modalManageConnections">
+    <div class="modal-content" style="max-width:700px;">
+        <div class="modal-header">
+            <h3>Manage Saved Connections</h3>
+            <span class="modal-close" data-close="modalManageConnections">✕</span>
+        </div>
+        <div class="modal-body" style="max-height:60vh;overflow-y:auto;padding:0;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Host</th>
+                        <th>User</th>
+                        <th>Location</th>
+                        <th>Restriction</th>
+                        <th style="width:120px;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="manageConnectionsTbody">
+                    <!-- populated by js -->
+                </tbody>
+            </table>
         </div>
     </div>
 </div>
