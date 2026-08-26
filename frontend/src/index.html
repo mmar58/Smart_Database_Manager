@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DB Manager — Full Database Maintainer</title>
+    <meta name="description" content="A premium, full-featured database manager for MySQL and PostgreSQL with backups, ER diagrams, slow query monitor and more.">
+    <link rel="stylesheet" href="style.css">
+    <!-- CodeMirror 6 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/codemirror.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/theme/dracula.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/theme/default.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/mode/sql/sql.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!--  CONNECTION OVERLAY                                     -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="connection-overlay" id="connectionOverlay">
+    <div class="connection-card">
+        <div class="connection-card-header">
+            <div class="connection-logo">⚡</div>
+            <h2>DB Manager</h2>
+            <p>Connect to MySQL or PostgreSQL</p>
+        </div>
+
+        <!-- Saved Connections -->
+        <div class="saved-conns-wrapper" id="savedConnsWrapper" style="display:none;">
+            <div class="form-group">
+                <label>Saved Connections</label>
+                <div style="display:flex;gap:8px;">
+                    <select class="form-control" id="savedConnections" style="flex:1;"></select>
+                    <button type="button" class="btn btn-secondary" id="manageConnectionsBtn" title="Manage saved connections">⚙️ Manage</button>
+                </div>
+            </div>
+        </div>
+
+        <form id="connectionForm">
+            <!-- Engine pills -->
+            <div class="engine-pills">
+                <div class="engine-pill active" data-engine="mysql" id="engineMysql">
+                    <span class="engine-pill-icon">🐬</span>
+                    MySQL
+                </div>
+                <div class="engine-pill" data-engine="postgresql" id="enginePostgresql">
+                    <span class="engine-pill-icon">🐘</span>
+                    PostgreSQL
+                </div>
+            </div>
+            <input type="hidden" id="engine" name="engine" value="mysql">
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="host">Host</label>
+                    <input class="form-control" type="text" id="host" name="host" value="localhost" placeholder="127.0.0.1" required>
+                </div>
+                <div class="form-group" style="max-width:120px;">
+                    <label for="port">Port</label>
+                    <input class="form-control" type="number" id="port" name="port" value="3306" placeholder="3306" required>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="user">Username</label>
+                    <input class="form-control" type="text" id="user" name="user" placeholder="root" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input class="form-control" type="password" id="password" name="password" placeholder="••••••••">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="database">Initial Database (Optional)</label>
+                <input class="form-control" type="text" id="database" name="database" placeholder="e.g. my_database">
+            </div>
+
+            <div class="advanced-toggle" id="advancedToggle">
+                <span>▶</span> Advanced Options (SSL)
+            </div>
+            <div class="advanced-section" id="advancedSection">
+                <div class="form-group">
+                    <label for="sslCa">SSL CA Certificate</label>
+                    <textarea class="form-control" id="sslCa" name="sslCa" rows="2" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="sslCert">SSL Client Certificate</label>
+                    <textarea class="form-control" id="sslCert" name="sslCert" rows="2" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="sslKey">SSL Client Key</label>
+                    <textarea class="form-control" id="sslKey" name="sslKey" rows="2" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="rejectUnauthorized" name="rejectUnauthorized" checked>
+                        Reject Unauthorized (Verify Server Certificate)
+                    </label>
+                </div>
+            </div>
+
+            <div class="form-group" style="margin-top:4px;">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="saveConnection" name="saveConnection">
+                    Save connection
+                </label>
+            </div>
+
+            <div id="saveOptionsSection" style="display:none; margin-left: 20px; border-left: 2px solid var(--border-color); padding-left: 10px; margin-bottom: 10px;">
+                <div class="form-group">
+                    <label>Save Location</label>
+                    <div style="display:flex;gap:10px;">
+                        <label class="checkbox-label"><input type="radio" name="saveLocation" value="local" checked> Local Storage</label>
+                        <label class="checkbox-label"><input type="radio" name="saveLocation" value="server"> Server</label>
+                    </div>
+                </div>
+
+                <div id="serverRestrictionSection" style="display:none;">
+                    <div class="form-group">
+                        <label>IP Restriction <span style="font-size: 0.85em; color: var(--text-muted);">(Your IP: <span id="currentUserIp">Loading...</span>)</span></label>
+                        <div style="display:flex;flex-direction:column;gap:5px;">
+                            <label class="checkbox-label"><input type="radio" name="ipRestriction" value="current" checked> Current IP Only</label>
+                            <label class="checkbox-label"><input type="radio" name="ipRestriction" value="all"> All IPs</label>
+                            <label class="checkbox-label"><input type="radio" name="ipRestriction" value="selected"> Selected IPs</label>
+                        </div>
+                    </div>
+                    <div class="form-group" id="selectedIpsInput" style="display:none; margin-top: 5px;">
+                        <input class="form-control" type="text" id="selectedIps" name="selectedIps" placeholder="Comma-separated IPs (e.g., 192.168.1.1, 10.0.0.5)">
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group" style="margin-top:16px;">
+                <button type="submit" class="btn btn-primary btn-block" id="connectBtn">
+                    Connect to Database
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!--  APP SHELL                                              -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="app-shell" id="appShell" style="display:none;">
+
+    <!-- HEADER -->
+    <header class="app-header">
+        <div class="header-logo">
+            <div class="header-logo-icon">⚡</div>
+            <span class="header-logo-text">DB Manager</span>
+        </div>
+
+        <div class="header-divider"></div>
+
+        <!-- Session tabs -->
+        <div class="session-tabs" id="sessionTabs">
+            <!-- tabs rendered by JS -->
+        </div>
+        <button class="session-tab-new" id="newSessionBtn" title="New connection tab">＋ New</button>
+        <button class="btn btn-secondary btn-sm" id="appShellManageConnectionsBtn" style="margin-left:auto; margin-right:15px;">⚙️ Manage Connections</button>
+
+        <!-- Right controls -->
+        <div class="header-controls">
+            <!-- System Stats -->
+            <div class="sys-stats" id="systemStats" style="display:none;">
+                <div class="sys-stat">
+                    <span class="sys-stat-label">CPU</span>
+                    <div class="sys-stat-bar"><div class="sys-stat-fill cpu" id="cpuBar" style="width:0%"></div></div>
+                    <span class="sys-stat-val" id="cpuText">0%</span>
+                </div>
+                <div class="sys-stat">
+                    <span class="sys-stat-label">MEM</span>
+                    <div class="sys-stat-bar"><div class="sys-stat-fill mem" id="memBar" style="width:0%"></div></div>
+                    <span class="sys-stat-val" id="memText">0%</span>
+                </div>
+            </div>
+
+            <div class="conn-status" id="connStatus">
+                <span class="conn-dot" id="connDot"></span>
+                <span id="connStatusText">Disconnected</span>
+            </div>
+
+            <button class="icon-btn" id="darkModeToggle" title="Toggle dark mode">🌙</button>
+            <button class="icon-btn" id="settingsBtn" title="Settings">⚙️</button>
+            <button class="btn btn-warning btn-sm" id="logoutBtn" style="display:none;">Logout</button>
+        </div>
+    </header>
+
+    <!-- BODY -->
+    <div class="app-body">
+
+        <!-- SIDEBAR -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-search">
+                    <span class="sidebar-search-icon">🔍</span>
+                    <input type="text" id="sidebarSearch" placeholder="Filter databases &amp; tables...">
+                </div>
+                <button class="sidebar-add-btn" id="createDatabaseBtn" title="Create database">+</button>
+            </div>
+            <div class="sidebar-tree" id="sidebarTree">
+                <div class="sidebar-empty" id="sidebarEmpty">Connect to a database to see your databases here.</div>
+            </div>
+        </aside>
+
+        <!-- CONTENT AREA -->
+        <main class="content-area" id="contentArea">
+            <!-- Content tabs -->
+            <nav class="content-tabs" id="contentTabs">
+                <button class="content-tab-btn active" data-tab="dashboard"><span class="tab-icon">🏠</span> Dashboard</button>
+                <button class="content-tab-btn" data-tab="data"><span class="tab-icon">📊</span> Data</button>
+                <button class="content-tab-btn" data-tab="structure"><span class="tab-icon">🧱</span> Structure</button>
+                <button class="content-tab-btn" data-tab="indexes"><span class="tab-icon">🗂️</span> Indexes</button>
+                <button class="content-tab-btn" data-tab="alter"><span class="tab-icon">✏️</span> Alter Table</button>
+                <button class="content-tab-btn" data-tab="query"><span class="tab-icon">💻</span> SQL Query</button>
+                <button class="content-tab-btn" data-tab="er"><span class="tab-icon">🔗</span> ER Diagram</button>
+                <button class="content-tab-btn" data-tab="slowqueries"><span class="tab-icon">🐌</span> Slow Queries</button>
+            </nav>
+
+            <!-- ── DASHBOARD TAB ─────────────────────── -->
+            <div class="tab-panel active" id="tab-dashboard">
+                <div class="dashboard-panel" id="dashboardPanel">
+                    <div class="dashboard-grid" id="dashboardStats">
+                        <!-- Stat cards populated by JS -->
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+                        <!-- DB sizes -->
+                        <div class="dashboard-section">
+                            <div class="dashboard-section-header">
+                                <span class="dashboard-section-title">📦 Database Sizes</span>
+                                <button class="btn btn-sm btn-ghost" id="refreshDbSizesBtn">Refresh</button>
+                            </div>
+                            <div class="dashboard-section-body">
+                                <div class="db-sizes-list" id="dbSizesList">
+                                    <div class="empty-state" style="padding:20px;">
+                                        <div class="text-muted text-sm">Connect to a database to view sizes</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Server info + recent backups -->
+                        <div style="display:flex;flex-direction:column;gap:16px;">
+                            <div class="dashboard-section">
+                                <div class="dashboard-section-header">
+                                    <span class="dashboard-section-title">🖥️ Server Info</span>
+                                </div>
+                                <div class="dashboard-section-body">
+                                    <div class="server-info-grid" id="serverInfoGrid">
+                                        <div class="server-info-item"><span class="server-info-label">Host</span><span class="server-info-value" id="serverHost">—</span></div>
+                                        <div class="server-info-item"><span class="server-info-label">Engine</span><span class="server-info-value" id="serverEngine">—</span></div>
+                                        <div class="server-info-item"><span class="server-info-label">CPU Cores</span><span class="server-info-value" id="serverCpuCores">—</span></div>
+                                        <div class="server-info-item"><span class="server-info-label">RAM</span><span class="server-info-value" id="serverRam">—</span></div>
+                                        <div class="server-info-item"><span class="server-info-label">Uptime</span><span class="server-info-value" id="serverUptime">—</span></div>
+                                        <div class="server-info-item"><span class="server-info-label">Platform</span><span class="server-info-value" id="serverPlatform">—</span></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="dashboard-section">
+                                <div class="dashboard-section-header">
+                                    <span class="dashboard-section-title">💾 Recent Backups</span>
+                                    <button class="btn btn-sm btn-ghost" id="manageBackupsBtn">Manage</button>
+                                </div>
+                                <div class="dashboard-section-body">
+                                    <div id="recentBackupsList">
+                                        <div class="text-muted text-sm">No backups yet</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── DATA TAB ──────────────────────────── -->
+            <div class="tab-panel" id="tab-data">
+                <div class="data-panel">
+                    <!-- Toolbar -->
+                    <div class="data-toolbar">
+                        <div class="data-toolbar-left">
+                            <span class="table-title" id="selectedTable">Select a table</span>
+                            <button class="btn btn-success btn-sm" id="insertRowBtn" style="display:none;">+ Insert Row</button>
+
+                            <!-- Filters -->
+                            <div class="search-area" id="searchArea">
+                                <div id="searchFiltersContainer">
+                                    <div class="filter-row">
+                                        <select class="filter-column form-control" style="width:130px;padding:5px 8px;font-size:12px;">
+                                            <option value="">Column</option>
+                                        </select>
+                                        <select class="filter-operator form-control" style="width:110px;padding:5px 8px;font-size:12px;">
+                                            <option value="LIKE">Contains</option>
+                                            <option value="NOT LIKE">Not Contains</option>
+                                            <option value="=">=</option>
+                                            <option value="!=">!=</option>
+                                            <option value=">">&gt;</option>
+                                            <option value="<">&lt;</option>
+                                        </select>
+                                        <input type="text" class="filter-value form-control" style="width:140px;padding:5px 8px;font-size:12px;" placeholder="Value...">
+                                        <button type="button" class="btn btn-danger btn-sm remove-filter-btn">✕</button>
+                                    </div>
+                                </div>
+                                <button type="button" id="addFilterBtn" class="btn btn-secondary btn-sm">+ Filter</button>
+                                <select id="searchLogic" class="form-control" style="width:70px;padding:5px;font-size:12px;">
+                                    <option value="AND">AND</option>
+                                    <option value="OR">OR</option>
+                                </select>
+                                <button id="searchBtn" class="btn btn-primary btn-sm">Search</button>
+                                <button id="clearSearchBtn" class="btn btn-secondary btn-sm">Clear</button>
+                            </div>
+                        </div>
+
+                        <div class="data-toolbar-right">
+                            <button id="deleteSelectedRows" class="btn btn-danger btn-sm" style="display:none;">Delete Selected</button>
+                            <button id="deleteAllData" class="btn btn-danger btn-sm" style="display:none;">Delete All</button>
+                            <button id="exportSelectedRows" class="btn btn-secondary btn-sm" style="display:none;">Export Selected</button>
+                            <button id="exportCurrentData" class="btn btn-primary btn-sm" style="display:none;">Export Data</button>
+                        </div>
+                    </div>
+
+                    <!-- Table -->
+                    <div class="table-wrapper">
+                        <table class="data-table" id="dataTable">
+                            <thead></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination -->
+                    <div class="pagination">
+                        <span class="pagination-info" id="pageInfo">No data</span>
+                        <button id="prevPage" class="btn btn-secondary btn-sm">‹ Prev</button>
+                        <button id="nextPage" class="btn btn-secondary btn-sm">Next ›</button>
+                        <select id="pageSize" class="form-control" style="width:auto;padding:4px 8px;font-size:12px;">
+                            <option value="25">25/page</option>
+                            <option value="50">50/page</option>
+                            <option value="100" selected>100/page</option>
+                            <option value="200">200/page</option>
+                        </select>
+                        <div style="display:flex;gap:4px;align-items:center;">
+                            <input type="number" id="pageJump" class="form-control" min="1" placeholder="#" style="width:60px;padding:4px 6px;font-size:12px;">
+                            <button id="pageJumpBtn" class="btn btn-secondary btn-sm">Go</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── STRUCTURE TAB ─────────────────────── -->
+            <div class="tab-panel" id="tab-structure">
+                <div class="structure-panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Table Structure</div>
+                        <div style="display:flex;gap:6px;">
+                            <button id="exportTableBtn" class="btn btn-primary btn-sm">Export Table</button>
+                            <button id="dropTableBtn" class="btn btn-danger btn-sm">Drop Table</button>
+                        </div>
+                    </div>
+                    <div class="table-wrapper" style="flex:none;">
+                        <table class="generic-table" id="structureTable">
+                            <thead>
+                                <tr>
+                                    <th>Field</th>
+                                    <th>Type</th>
+                                    <th>Null</th>
+                                    <th>Key</th>
+                                    <th>Default</th>
+                                    <th>Extra</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── INDEXES TAB ───────────────────────── -->
+            <div class="tab-panel" id="tab-indexes">
+                <div class="indexes-panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Table Indexes</div>
+                    </div>
+                    <table class="generic-table" id="indexesTable">
+                        <thead>
+                            <tr>
+                                <th>Key Name</th>
+                                <th>Column</th>
+                                <th>Unique</th>
+                                <th>Type</th>
+                                <th>Cardinality</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ── ALTER TABLE TAB ───────────────────── -->
+            <div class="tab-panel" id="tab-alter">
+                <div class="alter-panel">
+                    <!-- Add Column -->
+                    <div class="alter-section open">
+                        <div class="alter-section-header" data-section="addCol">
+                            ＋ Add Column <span style="margin-left:auto;font-size:11px;color:var(--text-muted);">▼</span>
+                        </div>
+                        <div class="alter-section-body">
+                            <form id="addColumnForm">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Column Name</label>
+                                        <input class="form-control" type="text" id="newColumnName" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Data Type</label>
+                                        <select class="form-control" id="newColumnType" required>
+                                            <option value="">Select Type</option>
+                                            <option>INT</option><option>BIGINT</option><option>VARCHAR(255)</option>
+                                            <option>TEXT</option><option>DATE</option><option>DATETIME</option>
+                                            <option>TIMESTAMP</option><option>DECIMAL(10,2)</option>
+                                            <option>BOOLEAN</option><option>JSON</option><option>UUID</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Default</label>
+                                        <input class="form-control" type="text" id="newColumnDefault" placeholder="NULL">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Position</label>
+                                        <select class="form-control" id="newColumnPosition">
+                                            <option value="LAST">Last</option>
+                                            <option value="FIRST">First</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" id="newColumnNull"> Allow NULL
+                                    </label>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Add Column</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Drop Column -->
+                    <div class="alter-section">
+                        <div class="alter-section-header" data-section="dropCol">
+                            ✕ Drop Column <span style="margin-left:auto;font-size:11px;color:var(--text-muted);">▶</span>
+                        </div>
+                        <div class="alter-section-body">
+                            <form id="dropColumnForm">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Column to Drop</label>
+                                        <select class="form-control" id="dropColumnName" required>
+                                            <option value="">Select Column</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group" style="display:flex;align-items:flex-end;">
+                                        <button type="submit" class="btn btn-danger btn-sm">Drop Column</button>
+                                    </div>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Modify Column -->
+                    <div class="alter-section">
+                        <div class="alter-section-header" data-section="modifyCol">
+                            ✏️ Modify Column <span style="margin-left:auto;font-size:11px;color:var(--text-muted);">▶</span>
+                        </div>
+                        <div class="alter-section-body">
+                            <form id="modifyColumnForm">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Column</label>
+                                        <select class="form-control" id="modifyColumnName" required>
+                                            <option value="">Select Column</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>New Data Type</label>
+                                        <select class="form-control" id="modifyColumnType" required>
+                                            <option value="">Select Type</option>
+                                            <option>INT</option><option>BIGINT</option><option>VARCHAR(255)</option>
+                                            <option>TEXT</option><option>DATE</option><option>DATETIME</option>
+                                            <option>TIMESTAMP</option><option>DECIMAL(10,2)</option>
+                                            <option>BOOLEAN</option><option>JSON</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Default</label>
+                                        <input class="form-control" type="text" id="modifyColumnDefault" placeholder="NULL">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" id="modifyColumnNull"> Allow NULL
+                                    </label>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Modify Column</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Add Index -->
+                    <div class="alter-section">
+                        <div class="alter-section-header" data-section="addIndex">
+                            🗂️ Add Index <span style="margin-left:auto;font-size:11px;color:var(--text-muted);">▶</span>
+                        </div>
+                        <div class="alter-section-body">
+                            <form id="addIndexForm">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Index Name</label>
+                                        <input class="form-control" type="text" id="newIndexName" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Column(s)</label>
+                                        <select class="form-control" id="newIndexColumns" multiple required style="height:80px;"></select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Index Type</label>
+                                        <select class="form-control" id="newIndexType" required>
+                                            <option value="INDEX">INDEX</option>
+                                            <option value="UNIQUE">UNIQUE</option>
+                                            <option value="FULLTEXT">FULLTEXT</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group" style="display:flex;align-items:flex-end;">
+                                        <button type="submit" class="btn btn-primary btn-sm">Add Index</button>
+                                    </div>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Custom ALTER -->
+                    <div class="alter-section">
+                        <div class="alter-section-header" data-section="customAlter">
+                            ⚡ Custom ALTER Statement <span style="margin-left:auto;font-size:11px;color:var(--text-muted);">▶</span>
+                        </div>
+                        <div class="alter-section-body">
+                            <form id="customAlterForm">
+                                <div class="form-group">
+                                    <label>ALTER TABLE Statement</label>
+                                    <textarea class="form-control" id="customAlterQuery" rows="3" placeholder="ALTER TABLE table_name ADD COLUMN ..."></textarea>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Execute ALTER</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── SQL QUERY TAB ─────────────────────── -->
+            <div class="tab-panel" id="tab-query">
+                <div class="sql-panel">
+                    <div class="sql-toolbar">
+                        <select id="queryDatabase" class="form-control" style="width:200px;padding:5px 8px;">
+                            <option value="">Select Database</option>
+                        </select>
+                        <button id="executeQuery" class="btn btn-primary btn-sm">▶ Execute</button>
+                        <button id="clearQuery" class="btn btn-secondary btn-sm">Clear</button>
+                        <button id="formatQuery" class="btn btn-secondary btn-sm">Format SQL</button>
+                        <button id="toggleQueryHistoryBtn" class="btn btn-ghost btn-sm">📜 History</button>
+                        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+                            <span class="text-muted text-sm" id="queryExecTime"></span>
+                        </div>
+                    </div>
+
+                    <!-- CodeMirror container -->
+                    <div class="sql-editor-container" id="sqlEditorContainer">
+                        <textarea id="sqlQuery" placeholder="SELECT * FROM my_table WHERE id = 1;" style="display:none;"></textarea>
+                    </div>
+
+                    <div class="sql-results" id="queryResults">
+                        <div class="empty-state" style="padding:30px;">
+                            <div class="empty-state-icon">💻</div>
+                            <div class="empty-state-title">SQL Query Editor</div>
+                            <div class="empty-state-desc">Write and execute SQL queries against any connected database</div>
+                        </div>
+                    </div>
+
+                    <!-- Query History -->
+                    <div class="query-history-panel" id="queryHistoryPanel" style="display:none;">
+                        <div class="qh-header">
+                            <span class="qh-title">📜 Query History</span>
+                            <button class="btn btn-danger btn-sm" id="clearQueryHistoryBtn">Clear History</button>
+                        </div>
+                        <div id="queryHistoryList"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── ER DIAGRAM TAB ─────────────────────── -->
+            <div class="tab-panel" id="tab-er">
+                <div class="er-panel">
+                    <div class="er-toolbar">
+                        <select id="erDatabase" class="form-control" style="width:200px;padding:5px 8px;">
+                            <option value="">Select Database</option>
+                        </select>
+                        <button class="btn btn-primary btn-sm" id="loadErBtn">Load Diagram</button>
+                        <button class="btn btn-secondary btn-sm" id="erZoomIn">+</button>
+                        <button class="btn btn-secondary btn-sm" id="erZoomOut">−</button>
+                        <button class="btn btn-secondary btn-sm" id="erReset">Reset Layout</button>
+                        <span class="text-muted text-sm" style="margin-left:auto;">Drag tables to rearrange. Lines show foreign key relationships.</span>
+                    </div>
+                    <div class="er-canvas-wrap" id="erCanvasWrap">
+                        <div class="er-canvas" id="erCanvas">
+                            <svg class="er-svg" id="erSvg" width="100%" height="100%"></svg>
+                            <!-- ER table cards rendered here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── SLOW QUERIES TAB ──────────────────── -->
+            <div class="tab-panel" id="tab-slowqueries">
+                <div class="sq-panel">
+                    <div class="sq-toolbar">
+                        <select id="sqDatabase" class="form-control" style="width:200px;padding:5px 8px;">
+                            <option value="">Select Database</option>
+                        </select>
+                        <input type="number" id="sqLimit" class="form-control" value="20" min="5" max="100" style="width:80px;padding:5px 8px;">
+                        <button class="btn btn-primary btn-sm" id="loadSlowQueriesBtn">Load Slow Queries</button>
+                        <span class="text-muted text-sm" style="margin-left:auto;">Requires performance_schema (MySQL) or pg_stat_statements (PostgreSQL)</span>
+                    </div>
+                    <div id="slowQueriesContent" style="flex:1;overflow:auto;padding:16px;">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">🐌</div>
+                            <div class="empty-state-title">Slow Query Monitor</div>
+                            <div class="empty-state-desc">Select a database and click "Load Slow Queries" to analyze query performance</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+</div>
+
+<!-- Error Log -->
+<div id="errorLogContainer" class="error-log-container">
+    <div class="error-log-header">
+        <span class="error-log-title">⚠️ Query Execution Errors</span>
+        <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary btn-sm" id="clearErrorLogBtn">Clear</button>
+            <button class="btn btn-ghost btn-sm" id="closeErrorLogBtn">✕</button>
+        </div>
+    </div>
+    <div id="errorLogList" class="error-log-list"></div>
+</div>
+
+<!-- Notifications -->
+<div class="notifications-container" id="notifications"></div>
+
+<!-- Context Menu -->
+<div class="context-menu" id="contextMenu" style="display:none;"></div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!--  MODALS                                                 -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<!-- Create Database -->
+<div class="modal-overlay" id="modalCreateDatabase">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title">📦 Create Database</span>
+            <button class="modal-close" data-close="modalCreateDatabase">✕</button>
+        </div>
+        <div class="modal-body">
+            <form id="createDatabaseForm">
+                <div class="form-group">
+                    <label for="newDatabaseName">Database Name</label>
+                    <input class="form-control" type="text" id="newDatabaseName" required placeholder="e.g. my_app_db">
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalCreateDatabase">Cancel</button>
+            <button type="submit" form="createDatabaseForm" class="btn btn-primary">Create</button>
+        </div>
+    </div>
+</div>
+
+<!-- Export Database -->
+<div class="modal-overlay" id="modalExportDatabase">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <span class="modal-title">📤 Export Database: <strong id="exportDbName"></strong></span>
+            <button class="modal-close" data-close="modalExportDatabase">✕</button>
+        </div>
+        <div class="modal-body">
+            <form id="exportDatabaseForm">
+                <div class="form-group">
+                    <label>Export Format</label>
+                    <div style="display:flex;gap:12px;margin-top:4px;">
+                        <label class="checkbox-label"><input type="radio" name="exportFormat" value="sql" checked> SQL</label>
+                        <label class="checkbox-label"><input type="radio" name="exportFormat" value="json"> JSON</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Export Strategy</label>
+                    <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">
+                        <label class="checkbox-label"><input type="radio" name="exportMethod" value="single" checked> Single File (All Tables)</label>
+                        <label class="checkbox-label"><input type="radio" name="exportMethod" value="split"> Separate Files per Table (ZIP)</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="exportIncludeData" checked> Include Data</label>
+                </div>
+                <div class="form-group">
+                    <label>Select Tables to Export</label>
+                    <div id="exportTablesList" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-md);padding:8px;margin-top:4px;"></div>
+                    <div style="display:flex;gap:6px;margin-top:6px;">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="selectAllTables()">Select All</button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="deselectAllTables()">Deselect All</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalExportDatabase">Cancel</button>
+            <button type="submit" form="exportDatabaseForm" class="btn btn-primary">Export Database</button>
+        </div>
+    </div>
+</div>
+
+<!-- Export Table -->
+<div class="modal-overlay" id="modalExportTable">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title">📤 Export Table: <strong id="exportTableName"></strong></span>
+            <button class="modal-close" data-close="modalExportTable">✕</button>
+        </div>
+        <div class="modal-body">
+            <form id="exportTableForm">
+                <div class="form-group">
+                    <label class="checkbox-label"><input type="checkbox" id="exportTableIncludeData" checked> Include Data</label>
+                </div>
+                <div class="form-group">
+                    <label>Format</label>
+                    <div style="display:flex;gap:12px;margin-top:4px;">
+                        <label class="checkbox-label"><input type="radio" name="tableExportFormat" value="sql" checked> SQL</label>
+                        <label class="checkbox-label"><input type="radio" name="tableExportFormat" value="json"> JSON</label>
+                    </div>
+                </div>
+                <div class="form-group" id="dataExportOptions">
+                    <label>Data Scope</label>
+                    <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">
+                        <label class="checkbox-label"><input type="radio" name="dataExportType" value="all" checked> All data</label>
+                        <label class="checkbox-label"><input type="radio" name="dataExportType" value="current"> Current filtered data</label>
+                        <label class="checkbox-label"><input type="radio" name="dataExportType" value="custom"> Custom WHERE clause</label>
+                    </div>
+                    <div id="customWhereClause" style="display:none;margin-top:8px;">
+                        <textarea class="form-control" id="exportWhereClause" rows="2" placeholder="id > 100 AND status = 'active'"></textarea>
+                        <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="previewRowCount()">Preview Row Count</button>
+                            <span id="rowCountPreview" class="text-muted text-sm"></span>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalExportTable">Cancel</button>
+            <button type="submit" form="exportTableForm" class="btn btn-primary">Export</button>
+        </div>
+    </div>
+</div>
+
+<!-- Import Database -->
+<div class="modal-overlay" id="modalImportDatabase">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title">📥 Import Database: <strong id="importDbName"></strong></span>
+            <button class="modal-close" data-close="modalImportDatabase">✕</button>
+        </div>
+        <div class="modal-body">
+            <form id="importDatabaseForm">
+                <div class="file-drop-zone" id="importDropZone">
+                    <div class="file-drop-zone-icon">📁</div>
+                    <div class="file-drop-zone-text">Click or drag a file here</div>
+                    <div class="file-drop-zone-sub">Supports .sql and .json files</div>
+                    <input type="file" id="importFile" accept=".sql,.json" required>
+                </div>
+                <div id="importFileInfo" style="display:none;margin-top:10px;padding:10px;background:var(--accent-light);border-radius:var(--radius-md);font-size:13px;color:var(--accent);"></div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalImportDatabase">Cancel</button>
+            <button type="submit" form="importDatabaseForm" class="btn btn-primary" id="startImportBtn">Start Import</button>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Row -->
+<div class="modal-overlay" id="modalEditRow">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <span class="modal-title">✏️ Edit Row</span>
+            <button class="modal-close" data-close="modalEditRow">✕</button>
+        </div>
+        <div class="modal-body">
+            <form id="editRowForm">
+                <div id="editRowFields"></div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalEditRow">Cancel</button>
+            <button type="submit" form="editRowForm" class="btn btn-primary">Save Changes</button>
+        </div>
+    </div>
+</div>
+
+<!-- Insert Row -->
+<div class="modal-overlay" id="modalInsertRow">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <span class="modal-title">+ Insert Row into <strong id="insertRowTableName"></strong></span>
+            <button class="modal-close" data-close="modalInsertRow">✕</button>
+        </div>
+        <div class="modal-body">
+            <form id="insertRowForm">
+                <div id="insertRowFields"></div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalInsertRow">Cancel</button>
+            <button type="submit" form="insertRowForm" class="btn btn-success">Insert Row</button>
+        </div>
+    </div>
+</div>
+
+<!-- Annotation -->
+<div class="modal-overlay" id="modalAnnotation">
+    <div class="modal">
+        <div class="modal-header">
+            <span class="modal-title">📝 Table Note: <strong id="annotationTableName"></strong></span>
+            <button class="modal-close" data-close="modalAnnotation">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>Note / Description</label>
+                <textarea class="annotation-editor" id="annotationText" rows="6" placeholder="Add a note about this table..."></textarea>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-danger btn-sm" id="deleteAnnotationBtn">Delete Note</button>
+            <button type="button" class="btn btn-secondary" data-close="modalAnnotation">Cancel</button>
+            <button type="button" class="btn btn-primary" id="saveAnnotationBtn">Save Note</button>
+        </div>
+    </div>
+</div>
+
+<!-- Schema Diff -->
+<div class="modal-overlay" id="modalSchemaDiff">
+    <div class="modal modal-xl">
+        <div class="modal-header">
+            <span class="modal-title">🔀 Schema Diff</span>
+            <button class="modal-close" data-close="modalSchemaDiff">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-row" style="margin-bottom:16px;">
+                <div class="form-group">
+                    <label>Database 1 (Source)</label>
+                    <select class="form-control" id="diffDb1"><option value="">Select...</option></select>
+                </div>
+                <div class="form-group">
+                    <label>Database 2 (Target)</label>
+                    <select class="form-control" id="diffDb2"><option value="">Select...</option></select>
+                </div>
+                <div class="form-group" style="display:flex;align-items:flex-end;">
+                    <button class="btn btn-primary" id="runDiffBtn">Compare</button>
+                </div>
+            </div>
+            <div id="diffResults">
+                <div class="empty-state" style="padding:20px;">
+                    <div class="empty-state-desc">Select two databases to compare their schemas</div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalSchemaDiff">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Backup History -->
+<div class="modal-overlay" id="modalBackupHistory">
+    <div class="modal modal-xl">
+        <div class="modal-header">
+            <span class="modal-title">💾 Backup History</span>
+            <div style="display:flex;gap:6px;">
+                <input type="file" id="uploadBackupInput" accept=".sql,.json,.zip" style="display:none;">
+                <button type="button" class="btn btn-primary btn-sm" id="uploadBackupBtn">📤 Upload Backup</button>
+            </div>
+            <button class="modal-close" data-close="modalBackupHistory">✕</button>
+        </div>
+        <div class="modal-body" style="padding:0;">
+            <table class="generic-table" id="backupHistoryTable">
+                <thead>
+                    <tr>
+                        <th>Filename</th>
+                        <th>Size</th>
+                        <th>Date</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalBackupHistory">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Settings -->
+<div class="modal-overlay" id="modalSettings">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <span class="modal-title">⚙️ Settings</span>
+            <button class="modal-close" data-close="modalSettings">✕</button>
+        </div>
+        <div class="modal-body" style="padding-top:0;">
+            <div class="settings-nav">
+                <button class="settings-nav-btn active" data-pane="paneGeneral">General</button>
+                <button class="settings-nav-btn" data-pane="paneBackup">Backup Profiles</button>
+                <button class="settings-nav-btn" data-pane="paneSecurity">Security</button>
+                <button class="settings-nav-btn" data-pane="paneAppearance">Appearance</button>
+            </div>
+
+            <!-- General pane -->
+            <div class="settings-pane active" id="paneGeneral">
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="settingShowSystemStats">
+                        Show CPU &amp; Memory stats in header
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="settingAutoReconnect">
+                        Auto-reconnect on page load (using saved credentials)
+                    </label>
+                </div>
+                <div class="form-group" style="margin-top:16px;">
+                    <button class="btn btn-secondary btn-sm" id="openSchemaDiffBtn">🔀 Open Schema Diff Tool</button>
+                    &nbsp;
+                    <button class="btn btn-secondary btn-sm" id="viewBackupHistoryBtn">💾 Manage Backup History</button>
+                </div>
+            </div>
+
+            <!-- Backup Profiles pane -->
+            <div class="settings-pane" id="paneBackup">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+                    <div>
+                        <div style="font-size:13.5px;font-weight:600;">Backup Profiles</div>
+                        <div class="text-muted text-sm">Each profile can target a different server &amp; databases</div>
+                    </div>
+                    <button class="btn btn-primary btn-sm" id="addProfileBtn">+ Add Profile</button>
+                </div>
+                <div id="profilesList">
+                    <!-- Profile cards rendered by JS -->
+                </div>
+            </div>
+
+            <!-- Security pane -->
+            <div class="settings-pane" id="paneSecurity">
+                <div class="dashboard-section" style="margin-bottom:14px;">
+                    <div class="dashboard-section-header">
+                        <span class="dashboard-section-title">🔐 Credential Storage</span>
+                    </div>
+                    <div class="dashboard-section-body">
+                        <p class="text-sm" style="color:var(--text-sub);margin-bottom:10px;">
+                            Passwords are stored encrypted using <strong>AES-256-GCM</strong> with a machine-derived key.
+                            The key is derived from your system hostname + a server-side salt that never leaves the server.
+                        </p>
+                        <p class="text-sm" style="color:var(--text-sub);margin-bottom:12px;">
+                            Encrypted credentials file: <code class="font-mono" style="font-size:11px;">src/data/credentials.enc</code>
+                        </p>
+                        <button class="btn btn-danger btn-sm" id="clearAllCredsBtn">🗑️ Clear All Stored Passwords</button>
+                    </div>
+                </div>
+                <div class="dashboard-section">
+                    <div class="dashboard-section-header">
+                        <span class="dashboard-section-title">🔑 Saved Connection Keys</span>
+                    </div>
+                    <div class="dashboard-section-body" id="savedCredKeysList">
+                        <div class="text-muted text-sm">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Appearance pane -->
+            <div class="settings-pane" id="paneAppearance">
+                <div class="form-group">
+                    <label>Theme</label>
+                    <div style="display:flex;gap:8px;margin-top:6px;">
+                        <div class="engine-pill active" id="themeLight" data-theme-opt="light">☀️ Light</div>
+                        <div class="engine-pill" id="themeDark" data-theme-opt="dark">🌙 Dark</div>
+                        <div class="engine-pill" id="themeAuto" data-theme-opt="auto">🖥️ Auto</div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>SQL Editor Theme</label>
+                    <select class="form-control" id="settingEditorTheme" style="max-width:250px;">
+                        <option value="default">Default (Light)</option>
+                        <option value="dracula">Dracula (Dark)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalSettings">Cancel</button>
+            <button type="button" class="btn btn-primary" id="saveSettingsBtn">Save Settings</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Backup Profile Modal -->
+<div class="modal-overlay" id="modalAddProfile">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <span class="modal-title" id="profileModalTitle">+ New Backup Profile</span>
+            <button class="modal-close" data-close="modalAddProfile">✕</button>
+        </div>
+        <div class="modal-body">
+            <input type="hidden" id="profileEditId">
+            <div class="form-group">
+                <label>Profile Name</label>
+                <input class="form-control" type="text" id="profileName" placeholder="e.g. Production DBs" required>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="profileEnabled" checked>
+                    Enabled
+                </label>
+            </div>
+            <div style="padding:14px;background:var(--bg-input);border-radius:var(--radius-md);margin-bottom:14px;">
+                <div style="font-size:13px;font-weight:600;margin-bottom:10px;color:var(--text-main);">Server Credentials</div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Host</label>
+                        <input class="form-control" type="text" id="profileHost" placeholder="localhost">
+                    </div>
+                    <div class="form-group" style="max-width:100px;">
+                        <label>Port</label>
+                        <input class="form-control" type="number" id="profilePort" value="3306">
+                    </div>
+                    <div class="form-group">
+                        <label>Engine</label>
+                        <select class="form-control" id="profileEngine">
+                            <option value="mysql">MySQL</option>
+                            <option value="postgresql">PostgreSQL</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input class="form-control" type="text" id="profileUser" placeholder="root">
+                    </div>
+                    <div class="form-group">
+                        <label>Password <span class="text-muted text-sm">(stored encrypted)</span></label>
+                        <input class="form-control" type="password" id="profilePassword" placeholder="••••••••">
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Databases to Backup</label>
+                <div class="text-muted text-sm" style="margin-bottom:6px;">Each database gets its own separate backup file</div>
+                <div style="display:flex;gap:6px;margin-bottom:6px;">
+                    <input class="form-control" type="text" id="profileDbInput" placeholder="Type a database name...">
+                    <button type="button" class="btn btn-secondary btn-sm" id="addProfileDbBtn">Add</button>
+                </div>
+                <div class="profile-dbs" id="profileDbChips"></div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Interval</label>
+                    <select class="form-control" id="profileInterval">
+                        <option value="hourly">Hourly</option>
+                        <option value="daily" selected>Daily (Midnight)</option>
+                        <option value="weekly">Weekly (Sunday)</option>
+                        <option value="custom">Custom Cron</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Retention (keep N backups per DB)</label>
+                    <input class="form-control" type="number" id="profileRetention" value="5" min="1" max="100">
+                </div>
+                <div class="form-group">
+                    <label>Max CPU % (skip if above)</label>
+                    <input class="form-control" type="number" id="profileCpuLimit" value="80" min="10" max="100">
+                </div>
+            </div>
+            <div class="form-group" id="profileCustomCronGroup" style="display:none;">
+                <label>Custom Cron Expression</label>
+                <input class="form-control font-mono" type="text" id="profileCustomCron" placeholder="0 2 * * *">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close="modalAddProfile">Cancel</button>
+            <button type="button" class="btn btn-primary" id="saveProfileBtn">Save Profile</button>
+        </div>
+    </div>
+</div>
+<!-- Manage Connections Modal -->
+<div class="modal" id="modalManageConnections">
+    <div class="modal-content" style="max-width:700px;">
+        <div class="modal-header">
+            <h3>Manage Saved Connections</h3>
+            <span class="modal-close" data-close="modalManageConnections">✕</span>
+        </div>
+        <div class="modal-body" style="max-height:60vh;overflow-y:auto;padding:0;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Host</th>
+                        <th>User</th>
+                        <th>Location</th>
+                        <th>Restriction</th>
+                        <th style="width:120px;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="manageConnectionsTbody">
+                    <!-- populated by js -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
