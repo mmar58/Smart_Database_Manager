@@ -1,8 +1,10 @@
 import { defineConfig } from 'vite';
+import { sveltekit } from '@sveltejs/kit/vite';
+import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 export default defineConfig({
-  root: 'src',
+  plugins: [sveltekit(), tailwindcss()],
   server: {
     port: 5173,
     proxy: {

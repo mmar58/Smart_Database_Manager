@@ -1,25 +1,25 @@
 import { io, Socket } from 'socket.io-client';
-import { state, notifyStateChanged } from '../state';
+import { appState, notifyStateChanged } from '$lib/state.svelte';
 
 // Socket instance
 export let socket: Socket;
 
 export function initSocket() {
     socket = io();
-    
+
     // Auto-reconnect credentials
     socket.io.on('reconnect', () => {
-        if (state.currentCredentials) {
-            socket.emit('set_credentials', state.currentCredentials);
+        if (appState.currentCredentials) {
+            socket.emit('set_credentials', appState.currentCredentials);
         }
     });
-    
+
     // System stats listener
     socket.on('stats_update', (data: any) => {
         // We will dispatch a custom event or let the dashboard UI module subscribe to this
         document.dispatchEvent(new CustomEvent('stats_update', { detail: data }));
     });
-    
+
     // Backup listeners
     socket.on('backup_progress', (msg: string) => {
         document.dispatchEvent(new CustomEvent('backup_progress', { detail: msg }));
@@ -30,15 +30,15 @@ export function initSocket() {
     socket.on('backup_error', (msg: string) => {
         document.dispatchEvent(new CustomEvent('backup_error', { detail: msg }));
     });
-    
+
     // Slow Queries listeners
     socket.on('slow_queries_data', (queries: any[]) => {
         document.dispatchEvent(new CustomEvent('slow_queries_data', { detail: queries }));
     });
-    
+
     // Settings listener
     socket.on('settings_data', (settings: any) => {
-        state.settings = settings;
+        appState.settings = settings;
         notifyStateChanged();
         document.dispatchEvent(new CustomEvent('settings_loaded', { detail: settings }));
     });
