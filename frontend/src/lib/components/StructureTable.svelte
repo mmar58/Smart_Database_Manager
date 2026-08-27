@@ -54,7 +54,7 @@
     // A helper to submit alter queries
     function executeAlter(query: string) {
         if (!appState.currentDatabase) return;
-        socket.emit("execute_query", appState.currentDatabase, query);
+        socket.emit("execute_query", { database: appState.currentDatabase, query });
         // Refresh after short delay assuming success
         setTimeout(refreshStructure, 500);
     }

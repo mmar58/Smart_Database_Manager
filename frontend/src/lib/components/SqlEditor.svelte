@@ -61,27 +61,46 @@
     });
 
     onMount(() => {
-        socket.on("query_result", (data: any) => {
+        socket.on("query_result", (res: any) => {
             isExecuting = false;
             error = "";
-            results = data.rows || [];
+            let fetchedResults = [];
+            
+            const payload = res.result;
+            if (payload) {
+                if (payload.type === 'SELECT') {
+                    if (payload.multipleStatements) {
+                        fetchedResults = payload.data[payload.data.length - 1]?.data || [];
+                    } else {
+                        fetchedResults = payload.data || [];
+                    }
+                    executionTime = `Executed in ${res.time || "0ms"}, ${payload.rowCount || 0} rows`;
+                } else if (payload.type === 'MODIFY') {
+                    fetchedResults = [{ Message: payload.message, "Affected Rows": payload.affectedRows, "Insert ID": payload.insertId }];
+                    executionTime = `Executed in ${res.time || "0ms"}`;
+                }
+            } else {
+                 // fallback if backend sends array directly somehow
+                 fetchedResults = Array.isArray(res) ? res : [];
+            }
+            
+            results = fetchedResults;
             if (results && results.length > 0) {
                 columns = Object.keys(results[0]);
             } else {
                 columns = [];
             }
-            executionTime = `Executed in ${data.time || "0ms"}`;
 
             // Add to history
             history = [
-                { query: data.query, time: new Date().toLocaleTimeString() },
+                { query: res.query, time: new Date().toLocaleTimeString() },
                 ...history,
             ].slice(0, 50);
         });
 
-        socket.on("query_error", (msg: string) => {
+        socket.on("query_execution_error", (data: any) => {
             isExecuting = false;
-            error = msg;
+            error = data.message || "Unknown error";
             results = null;
             columns = [];
             executionTime = "";
@@ -97,7 +116,7 @@
 
         return () => {
             socket.off("query_result");
-            socket.off("query_error");
+            socket.off("query_execution_error");
             socket.off("query_info");
         };
     });
@@ -111,7 +130,7 @@
 
         isExecuting = true;
         error = "";
-        socket.emit("execute_query", appState.currentDatabase, query);
+        socket.emit("execute_query", { database: appState.currentDatabase, query });
     }
 </script>
 

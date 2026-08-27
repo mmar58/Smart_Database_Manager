@@ -83,21 +83,35 @@
                 cleanup();
                 resolve(data);
             };
-            const onError = (err: string) => {
+            const onError = (data: any) => {
                 cleanup();
-                reject(err);
+                reject(data.message || "Unknown error");
             };
             
             const cleanup = () => {
                 socket.off("query_result", onResult);
-                socket.off("query_error", onError);
+                socket.off("query_execution_error", onError);
             };
 
             socket.on("query_result", onResult);
-            socket.on("query_error", onError);
+            socket.on("query_execution_error", onError);
             
-            socket.emit("execute_query", db, query);
+            socket.emit("execute_query", { database: db, query });
         });
+    }
+
+    // Helper to safely extract rows from a query result
+    function extractRows(res: any): any[] {
+        const payload = res.result;
+        if (!payload) return Array.isArray(res) ? res : [];
+        if (payload.type === 'SELECT') {
+            return payload.multipleStatements 
+                ? (payload.data[payload.data.length - 1]?.data || []) 
+                : (payload.data || []);
+        } else if (payload.type === 'MODIFY') {
+            return [{ Message: payload.message, AffectedRows: payload.affectedRows, InsertID: payload.insertId }];
+        }
+        return [];
     }
 
     async function sendMessage() {
@@ -202,8 +216,8 @@
                                 if (q.includes('DROP ') || q.includes('DELETE ') || q.includes('TRUNCATE ')) {
                                     if (confirm(`Ollama wants to run a destructive query:\n\n${args.query}\n\nAllow this execution?`)) {
                                         try {
-                                            const res = await executeQueryPromise(appState.currentDatabase, args.query);
-                                            toolResult = JSON.stringify(res.rows || res).substring(0, 1000); // truncate for context
+                                            const res: any = await executeQueryPromise(appState.currentDatabase, args.query);
+                                            toolResult = JSON.stringify(extractRows(res)).substring(0, 1000); // truncate for context
                                         } catch(e) {
                                             toolResult = `Error executing query: ${e}`;
                                         }
@@ -212,8 +226,8 @@
                                     }
                                 } else {
                                     try {
-                                        const res = await executeQueryPromise(appState.currentDatabase, args.query);
-                                        toolResult = JSON.stringify(res.rows || res).substring(0, 1000);
+                                        const res: any = await executeQueryPromise(appState.currentDatabase, args.query);
+                                        toolResult = JSON.stringify(extractRows(res)).substring(0, 1000);
                                     } catch(e) {
                                         toolResult = `Error executing query: ${e}`;
                                     }
@@ -225,7 +239,7 @@
                             } else {
                                 try {
                                     const res: any = await executeQueryPromise(appState.currentDatabase, `DESCRIBE \`${args.table_name}\``);
-                                    toolResult = JSON.stringify(res.rows || res);
+                                    toolResult = JSON.stringify(extractRows(res));
                                 } catch(e) {
                                     toolResult = `Error: ${e}`;
                                 }
