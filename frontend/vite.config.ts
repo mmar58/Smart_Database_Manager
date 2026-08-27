@@ -6,7 +6,8 @@ import path from 'path';
 export default defineConfig({
   plugins: [sveltekit(), tailwindcss()],
   server: {
-    port: 5173,
+    host: true,
+    port: 8155,
     proxy: {
       // Proxy all REST API calls to the Express backend
       '/api': {

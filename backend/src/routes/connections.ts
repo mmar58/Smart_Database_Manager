@@ -22,6 +22,9 @@ router.post('/save', async (req: Request, res: Response) => {
     };
     if (!id || !connection)
       return res.status(400).json({ error: 'Missing id or connection' });
+    if (connection.ipRestriction === 'current') {
+      connection.savedIp = getClientIp(req);
+    }
     const connections = await loadServerConnections() as ServerConnectionsMap;
     connections[id] = connection;
     await saveServerConnections(connections);

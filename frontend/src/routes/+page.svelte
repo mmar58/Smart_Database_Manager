@@ -10,8 +10,12 @@
 
 <div class="flex h-screen w-full overflow-hidden bg-background text-foreground">
 	{#if !state.isConnected}
-		<div class="m-auto w-full max-w-2xl">
-			<ConnectionManager />
+		<div class="w-full h-full overflow-y-auto">
+			<div class="min-h-full flex flex-col justify-center py-8 px-4">
+				<div class="mx-auto w-full max-w-2xl">
+					<ConnectionManager />
+				</div>
+			</div>
 		</div>
 	{:else}
 		<!-- Main App View -->

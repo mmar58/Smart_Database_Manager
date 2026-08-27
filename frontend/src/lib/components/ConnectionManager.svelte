@@ -24,6 +24,7 @@
 
     let saveConnection = $state(false);
     let saveLocation = $state<"local" | "server">("local");
+    let ipRestriction = $state<"all" | "current" | "selected">("current");
 
     let isConnecting = $state(false);
     let connectionError = $state("");
@@ -54,9 +55,16 @@
             // Load server-saved connections
             const serverRes = await api.get<{
                 status: string;
-                connections: ServerConnection[];
+                connections: Record<string, ServerConnection>;
             }>("/connections/list");
-            let list = serverRes.connections || [];
+            let list: ServerConnection[] = [];
+            if (serverRes.connections) {
+                list = Object.entries(serverRes.connections).map(([id, c]) => ({
+                    ...c,
+                    _id: id,
+                    _location: "server"
+                }));
+            }
 
             // Load locally-saved connections
             const localRaw = localStorage.getItem("db_manager_connections");
@@ -140,6 +148,7 @@
             sslCert: sslCert || undefined,
             sslKey: sslKey || undefined,
             rejectUnauthorized,
+            ipRestriction,
         };
 
         if (saveConnection) {
@@ -148,7 +157,10 @@
 
             if (saveLocation === "server") {
                 try {
-                    await api.post("/connections/save", payload);
+                    await api.post("/connections/save", {
+                        id: payload._id,
+                        connection: payload
+                    });
                 } catch (err: any) {
                     connectionError =
                         "Failed to save connection to server: " + err.message;
@@ -399,29 +411,44 @@
             </label>
 
             {#if saveConnection}
-                <div class="flex gap-4 pl-6">
-                    <label
-                        class="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
-                    >
-                        <input
-                            type="radio"
-                            bind:group={saveLocation}
-                            value="local"
-                            class="text-primary focus:ring-primary"
-                        />
-                        Local Storage
-                    </label>
-                    <label
-                        class="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
-                    >
-                        <input
-                            type="radio"
-                            bind:group={saveLocation}
-                            value="server"
-                            class="text-primary focus:ring-primary"
-                        />
-                        Server DB
-                    </label>
+                <div class="flex flex-col gap-3 pl-6">
+                    <div class="flex gap-4">
+                        <label
+                            class="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
+                        >
+                            <input
+                                type="radio"
+                                bind:group={saveLocation}
+                                value="local"
+                                class="text-primary focus:ring-primary"
+                            />
+                            Local Storage
+                        </label>
+                        <label
+                            class="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
+                        >
+                            <input
+                                type="radio"
+                                bind:group={saveLocation}
+                                value="server"
+                                class="text-primary focus:ring-primary"
+                            />
+                            Server DB
+                        </label>
+                    </div>
+
+                    {#if saveLocation === "server"}
+                        <div class="flex flex-col gap-2 mt-2">
+                            <label class="text-sm font-medium leading-none text-muted-foreground">IP Restriction</label>
+                            <select
+                                bind:value={ipRestriction}
+                                class="flex h-9 w-full max-w-xs rounded-md border border-input bg-background px-3 py-1 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                            >
+                                <option value="current">Only allow my current IP</option>
+                                <option value="all">Allow all IPs</option>
+                            </select>
+                        </div>
+                    {/if}
                 </div>
             {/if}
         </div>
