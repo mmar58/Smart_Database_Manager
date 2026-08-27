@@ -26,7 +26,7 @@ export const options = {
 		app: ({ head, body, assets, nonce, env }) => "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\">\n<head>\n    <meta charset=\"utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <meta name=\"description\" content=\"A premium, full-featured database manager for MySQL and PostgreSQL\" />\n    <title>DB Manager</title>\n    <!-- CodeMirror for legacy SQL Editor compat (optional, can be migrated) -->\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/codemirror.min.js\"></script>\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/mode/sql/sql.min.js\"></script>\n    <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/codemirror.min.css\">\n    <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/codemirror/6.65.7/theme/dracula.min.css\">\n    " + head + "\n</head>\n<body data-sveltekit-preload-data=\"hover\">\n    <div style=\"display: contents\">" + body + "</div>\n</body>\n</html>\n",
 		error
 	},
-	version_hash: "3iuv5g"
+	version_hash: "2ugc63"
 };
 
 export async function get_hooks() {

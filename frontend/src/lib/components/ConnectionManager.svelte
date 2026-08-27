@@ -40,7 +40,7 @@
 
         socket.on("connection_error", (msg) => {
             isConnecting = false;
-            connectionError = msg;
+            connectionError = typeof msg === 'object' ? (msg.error || msg.message || JSON.stringify(msg)) : msg;
         });
 
         return () => {
@@ -173,7 +173,9 @@
         }
 
         appState.currentCredentials = payload;
-        socket.emit("connect_server", payload);
+        isConnecting = true;
+        connectionError = "";
+        socket.emit("connect_database", payload);
     }
 
     function setEngine(e: "mysql" | "postgresql") {
@@ -183,15 +185,13 @@
     }
 </script>
 
-<div
-    class="m-auto w-full max-w-2xl p-6 bg-card rounded-xl border shadow-2xl flex flex-col gap-6"
->
-    <div class="flex flex-col items-center gap-2 mb-2 text-primary">
-        <div class="p-3 bg-primary/10 rounded-full">
-            <Database class="w-8 h-8" />
+<div class="m-auto w-full max-w-2xl p-8 bg-card/80 backdrop-blur-xl rounded-2xl border shadow-[0_8px_30px_rgb(0,0,0,0.12)] flex flex-col gap-6 transition-all">
+    <div class="flex flex-col items-center gap-3 mb-4 text-primary">
+        <div class="p-4 bg-gradient-to-br from-primary/20 to-primary/5 rounded-2xl shadow-inner border border-primary/10">
+            <Database class="w-10 h-10 text-primary drop-shadow-md" />
         </div>
-        <h1 class="text-2xl font-bold tracking-tight">DB Manager</h1>
-        <p class="text-sm text-muted-foreground">Connect to your database</p>
+        <h1 class="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-primary to-primary/60">DB Manager</h1>
+        <p class="text-sm font-medium text-muted-foreground">Securely connect to your database</p>
     </div>
 
     {#if connectionError}

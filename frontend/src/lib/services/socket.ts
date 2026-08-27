@@ -1,10 +1,12 @@
 import { io, Socket } from 'socket.io-client';
 import { appState, notifyStateChanged } from '$lib/state.svelte';
 
+import { browser } from '$app/environment';
+
 // Socket instance
 export let socket: Socket;
 
-export function initSocket() {
+if (browser) {
     socket = io();
 
     // Auto-reconnect credentials
@@ -16,7 +18,6 @@ export function initSocket() {
 
     // System stats listener
     socket.on('stats_update', (data: any) => {
-        // We will dispatch a custom event or let the dashboard UI module subscribe to this
         document.dispatchEvent(new CustomEvent('stats_update', { detail: data }));
     });
 

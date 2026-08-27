@@ -51,6 +51,7 @@ interface PgBaseConfig {
   port: number;
   user?: string;
   password?: string;
+  connectionTimeoutMillis?: number;
   ssl?: Record<string, unknown>;
 }
 
@@ -73,6 +74,7 @@ export class DatabaseManager {
       port: credentials.port ?? 5432,
       user: credentials.user ?? credentials.username,
       password: credentials.password,
+      connectionTimeoutMillis: credentials.connectTimeout ?? 10000,
       ...(sslConfig && { ssl: sslConfig }),
     };
 
