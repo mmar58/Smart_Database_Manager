@@ -50,6 +50,26 @@ export interface AppSettings {
     [key: string]: any;
 }
 
+export interface OllamaMessage {
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string;
+    action?: string; // used for logging tool calls
+}
+
+export interface OllamaChatSession {
+    id: string;
+    title: string;
+    messages: OllamaMessage[];
+    updatedAt: number;
+}
+
+export interface OllamaAssistantState {
+    isOpen: boolean;
+    layout: 'floating' | 'sidebar';
+    sessions: OllamaChatSession[];
+    currentSessionId: string | null;
+}
+
 export interface BackupProfile {
     id: string;
     name: string;

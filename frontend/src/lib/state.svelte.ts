@@ -33,6 +33,12 @@ export const appState = $state({
         ollamaApiUrl: 'http://localhost:11434',
         ollamaModel: ''
     } as AppSettings,
+    ollama: {
+        isOpen: false,
+        layout: 'floating',
+        sessions: [],
+        currentSessionId: null
+    } as import('./types').OllamaAssistantState
 });
 
 export function initSettings() {
@@ -43,9 +49,27 @@ export function initSettings() {
             appState.settings = { ...appState.settings, ...parsed };
             appState.theme = appState.settings.theme || 'dark';
         }
+        
+        const savedOllama = localStorage.getItem('ollamaState');
+        if (savedOllama) {
+            const parsed = JSON.parse(savedOllama);
+            appState.ollama.layout = parsed.layout || 'floating';
+            appState.ollama.sessions = parsed.sessions || [];
+            appState.ollama.currentSessionId = parsed.currentSessionId || null;
+            // Always start closed
+            appState.ollama.isOpen = false;
+        }
     } catch (e) {
         console.error('Error loading settings', e);
     }
+}
+
+export function saveOllamaState() {
+    localStorage.setItem('ollamaState', JSON.stringify({
+        layout: appState.ollama.layout,
+        sessions: appState.ollama.sessions,
+        currentSessionId: appState.ollama.currentSessionId
+    }));
 }
 
 export function saveSettings(newSettings: Partial<AppSettings>) {

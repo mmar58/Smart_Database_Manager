@@ -8,7 +8,6 @@
     import { defaultKeymap } from "@codemirror/commands";
     import { sql } from "@codemirror/lang-sql";
     import { oneDark } from "@codemirror/theme-one-dark";
-    import OllamaChat from "./OllamaChat.svelte";
 
     let query = $state("");
     let results = $state<any[] | null>(null);
@@ -17,8 +16,6 @@
     let executionTime = $state("");
     let isExecuting = $state(false);
     let history = $state<{ query: string; time: string }[]>([]);
-    
-    let isChatOpen = $state(false);
 
     let editorView: EditorView | null = null;
 
@@ -166,19 +163,10 @@
                 <Clock class="w-4 h-4" />
                 {executionTime}
             {/if}
-            <button
-                class="flex items-center gap-2 px-3 py-1.5 ml-2 {isChatOpen ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'} rounded-md text-sm font-medium hover:opacity-90"
-                onclick={() => (isChatOpen = !isChatOpen)}
-            >
-                <Bot class="w-4 h-4" />
-                Ollama Assistant
-            </button>
         </div>
     </div>
 
     <div class="flex flex-1 min-h-0 relative">
-        <OllamaChat bind:isOpen={isChatOpen} bind:queryEditorValue={query} />
-        
         <!-- Editor -->
         <div class="w-1/2 border-r flex flex-col bg-background relative h-full">
             <div use:createEditor class="flex-1 w-full h-full absolute inset-0"></div>

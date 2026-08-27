@@ -7,7 +7,9 @@
 	import SqlEditor from "$lib/components/SqlEditor.svelte";
 	import StructureTable from "$lib/components/StructureTable.svelte";
 	import SettingsModal from "$lib/components/SettingsModal.svelte";
+	import OllamaChat from "$lib/components/OllamaChat.svelte";
 	import { initSettings } from "$lib/state.svelte";
+	import { Bot } from "@lucide/svelte";
 	import { onMount } from "svelte";
 
 	let isSettingsOpen = $state(false);
@@ -92,6 +94,13 @@
 						>
 					{/if}
 					<button
+						class="flex items-center gap-2 px-3 py-1.5 ml-2 {appState.ollama.isOpen ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'} rounded-md text-sm font-medium hover:opacity-90"
+						onclick={() => (appState.ollama.isOpen = !appState.ollama.isOpen)}
+					>
+						<Bot class="w-4 h-4" />
+						Ollama Assistant
+					</button>
+					<button
 						class="bg-secondary text-secondary-foreground px-3 py-1.5 rounded-md text-xs ml-2 hover:bg-secondary/80 transition-colors"
 						onclick={() => (isSettingsOpen = true)}
 						>⚙️ Settings</button
@@ -100,7 +109,8 @@
 			</header>
 
 			<!-- Content Component -->
-			<main class="flex-1 overflow-hidden">
+			<main class="flex-1 overflow-hidden relative">
+				<OllamaChat />
 				{#if appState.activeTab === "query"}
 					<SqlEditor />
 				{:else if appState.activeTab === "structure" && appState.currentTable}
