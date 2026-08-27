@@ -7,8 +7,8 @@
   "author": "mmar58",
   "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "backend": "pnpm --filter backend exec nodemon",
-    "frontend": "pnpm --filter frontend exec nodemon",
+    "backend": "cd backend && pnpm dev",
+    "frontend": "cd frontend && pnpm dev",
     "dev": "npm run backend:dev && npm run frontend:dev",
     "build": "pnpm --filter backend build && pnpm --filter frontend build",
     "start": "pnpm --filter backend start",

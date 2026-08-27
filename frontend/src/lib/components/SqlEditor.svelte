@@ -2,9 +2,13 @@
     import { onMount, onDestroy } from "svelte";
     import { socket } from "$lib/services/socket";
     import { appState } from "$lib/state.svelte";
-    import { Play, Code, Clock, Trash2 } from "@lucide/svelte";
-    // We use basic textarea for now to avoid CM6 Svelte SSR issues,
-    // will upgrade to CodeMirror if needed.
+    import { Play, Code, Clock, Trash2, Bot } from "@lucide/svelte";
+    import { EditorState } from "@codemirror/state";
+    import { EditorView, keymap } from "@codemirror/view";
+    import { defaultKeymap } from "@codemirror/commands";
+    import { sql } from "@codemirror/lang-sql";
+    import { oneDark } from "@codemirror/theme-one-dark";
+    import OllamaChat from "./OllamaChat.svelte";
 
     let query = $state("");
     let results = $state<any[] | null>(null);
@@ -13,6 +17,48 @@
     let executionTime = $state("");
     let isExecuting = $state(false);
     let history = $state<{ query: string; time: string }[]>([]);
+    
+    let isChatOpen = $state(false);
+
+    let editorView: EditorView | null = null;
+
+    function createEditor(node: HTMLElement) {
+        const state = EditorState.create({
+            doc: query,
+            extensions: [
+                keymap.of(defaultKeymap),
+                sql(),
+                oneDark,
+                EditorView.theme({
+                    "&": { height: "100%", width: "100%", outline: "none" },
+                    ".cm-scroller": { overflow: "auto" }
+                }),
+                EditorView.updateListener.of((v) => {
+                    if (v.docChanged) {
+                        query = v.state.doc.toString();
+                    }
+                })
+            ]
+        });
+        editorView = new EditorView({
+            state,
+            parent: node
+        });
+
+        return {
+            destroy() {
+                editorView?.destroy();
+            }
+        };
+    }
+
+    $effect(() => {
+        if (editorView && query !== editorView.state.doc.toString()) {
+            editorView.dispatch({
+                changes: { from: 0, to: editorView.state.doc.length, insert: query }
+            });
+        }
+    });
 
     onMount(() => {
         socket.on("query_result", (data: any) => {
@@ -101,17 +147,22 @@
                 <Clock class="w-4 h-4" />
                 {executionTime}
             {/if}
+            <button
+                class="flex items-center gap-2 px-3 py-1.5 ml-2 {isChatOpen ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'} rounded-md text-sm font-medium hover:opacity-90"
+                onclick={() => (isChatOpen = !isChatOpen)}
+            >
+                <Bot class="w-4 h-4" />
+                Ollama Assistant
+            </button>
         </div>
     </div>
 
-    <div class="flex flex-1 min-h-0">
+    <div class="flex flex-1 min-h-0 relative">
+        <OllamaChat bind:isOpen={isChatOpen} bind:queryEditorValue={query} />
+        
         <!-- Editor -->
-        <div class="w-1/2 border-r flex flex-col bg-background">
-            <textarea
-                bind:value={query}
-                class="flex-1 w-full p-4 font-mono text-sm resize-none focus:outline-none bg-background text-foreground"
-                placeholder="SELECT * FROM my_table WHERE id = 1;"
-            ></textarea>
+        <div class="w-1/2 border-r flex flex-col bg-background relative h-full">
+            <div use:createEditor class="flex-1 w-full h-full absolute inset-0"></div>
         </div>
 
         <!-- Results / History -->

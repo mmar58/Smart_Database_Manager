@@ -28,9 +28,31 @@ export const appState = $state({
 
     // App Data
     annotations: {} as Record<string, string>,
-    settings: {} as AppSettings,
-
+    settings: {
+        theme: 'dark',
+        ollamaApiUrl: 'http://localhost:11434',
+        ollamaModel: ''
+    } as AppSettings,
 });
+
+export function initSettings() {
+    try {
+        const saved = localStorage.getItem('appSettings');
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            appState.settings = { ...appState.settings, ...parsed };
+            appState.theme = appState.settings.theme || 'dark';
+        }
+    } catch (e) {
+        console.error('Error loading settings', e);
+    }
+}
+
+export function saveSettings(newSettings: Partial<AppSettings>) {
+    appState.settings = { ...appState.settings, ...newSettings };
+    if (newSettings.theme) appState.theme = newSettings.theme;
+    localStorage.setItem('appSettings', JSON.stringify(appState.settings));
+}
 
 export function notifyStateChanged() {
     // No-op in Svelte 5 since $state is deeply reactive!

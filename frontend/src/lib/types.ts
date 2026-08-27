@@ -45,6 +45,8 @@ export interface FilterConfig {
 
 export interface AppSettings {
     theme?: 'light' | 'dark';
+    ollamaApiUrl?: string;
+    ollamaModel?: string;
     [key: string]: any;
 }
 

@@ -17,14 +17,12 @@
     let newColumnPosition = $state("LAST");
     let newColumnNull = $state(false);
 
-    // Drop Col
-    let dropColumnName = $state("");
-
-    // Modify Col
-    let modifyColumnName = $state("");
-    let modifyColumnType = $state("");
-    let modifyColumnDefault = $state("");
-    let modifyColumnNull = $state(false);
+    // Inline Edit State
+    let editingColumn = $state<string | null>(null);
+    let editField = $state("");
+    let editType = $state("");
+    let editDefault = $state("");
+    let editNull = $state(false);
 
     onMount(() => {
         // Initial load if structure was requested
@@ -73,24 +71,36 @@
         executeAlter(query);
     }
 
-    function handleDropColumn(e: Event) {
-        e.preventDefault();
-        if (!dropColumnName || !appState.currentTable) return;
-        if (!confirm(`Drop column ${dropColumnName}?`)) return;
+    function handleDropInline(colName: string) {
+        if (!appState.currentTable) return;
+        if (!confirm(`Drop column ${colName}? This action cannot be undone and may cause data loss.`)) return;
         
-        const query = `ALTER TABLE \`${appState.currentTable}\` DROP COLUMN \`${dropColumnName}\``;
+        const query = `ALTER TABLE \`${appState.currentTable}\` DROP COLUMN \`${colName}\``;
         executeAlter(query);
     }
 
-    function handleModifyColumn(e: Event) {
-        e.preventDefault();
-        if (!modifyColumnName || !modifyColumnType || !appState.currentTable) return;
+    function startEditing(col: TableColumn) {
+        editingColumn = col.Field;
+        editField = col.Field;
+        // Basic extraction of type, this might need better parsing for complex types
+        editType = col.Type.toUpperCase();
+        editDefault = col.Default || "";
+        editNull = col.Null === "YES";
+    }
+
+    function cancelEditing() {
+        editingColumn = null;
+    }
+
+    function saveEditing() {
+        if (!editingColumn || !editField || !editType || !appState.currentTable) return;
         
-        let query = `ALTER TABLE \`${appState.currentTable}\` MODIFY COLUMN \`${modifyColumnName}\` ${modifyColumnType}`;
-        if (!modifyColumnNull) query += " NOT NULL";
-        if (modifyColumnDefault) query += ` DEFAULT '${modifyColumnDefault}'`;
+        let query = `ALTER TABLE \`${appState.currentTable}\` CHANGE COLUMN \`${editingColumn}\` \`${editField}\` ${editType}`;
+        if (!editNull) query += " NOT NULL";
+        if (editDefault) query += ` DEFAULT '${editDefault}'`;
         
         executeAlter(query);
+        editingColumn = null;
     }
 </script>
 
@@ -113,22 +123,56 @@
                             <th class="px-4 py-3 border-b">Key</th>
                             <th class="px-4 py-3 border-b">Default</th>
                             <th class="px-4 py-3 border-b">Extra</th>
+                            <th class="px-4 py-3 border-b w-[100px]">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         {#each structure as col}
-                            <tr class="border-b hover:bg-muted/50">
-                                <td class="px-4 py-3 font-medium">{col.Field}</td>
-                                <td class="px-4 py-3 font-mono text-muted-foreground">{col.Type}</td>
-                                <td class="px-4 py-3">{col.Null}</td>
-                                <td class="px-4 py-3 font-medium text-primary">{col.Key}</td>
-                                <td class="px-4 py-3 text-muted-foreground">{col.Default === null ? 'NULL' : col.Default}</td>
-                                <td class="px-4 py-3 text-muted-foreground">{col.Extra}</td>
+                            <tr class="border-b hover:bg-muted/50 transition-colors">
+                                {#if editingColumn === col.Field}
+                                    <td class="px-2 py-2">
+                                        <input type="text" bind:value={editField} class="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs" />
+                                    </td>
+                                    <td class="px-2 py-2">
+                                        <input type="text" bind:value={editType} class="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs font-mono" />
+                                    </td>
+                                    <td class="px-2 py-2 text-center">
+                                        <input type="checkbox" bind:checked={editNull} class="rounded border-input text-primary" />
+                                    </td>
+                                    <td class="px-4 py-3 font-medium text-primary">{col.Key}</td>
+                                    <td class="px-2 py-2">
+                                        <input type="text" bind:value={editDefault} class="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs" placeholder="NULL" />
+                                    </td>
+                                    <td class="px-4 py-3 text-muted-foreground">{col.Extra}</td>
+                                    <td class="px-2 py-2 flex items-center gap-1">
+                                        <button onclick={saveEditing} class="p-1.5 bg-primary/10 text-primary hover:bg-primary hover:text-primary-foreground rounded transition-colors" title="Save">
+                                            <Settings class="w-4 h-4" /> <!-- Using settings as check for now, can change icon -->
+                                        </button>
+                                        <button onclick={cancelEditing} class="p-1.5 bg-muted text-muted-foreground hover:bg-destructive hover:text-destructive-foreground rounded transition-colors" title="Cancel">
+                                            <Trash2 class="w-4 h-4" />
+                                        </button>
+                                    </td>
+                                {:else}
+                                    <td class="px-4 py-3 font-medium">{col.Field}</td>
+                                    <td class="px-4 py-3 font-mono text-muted-foreground">{col.Type}</td>
+                                    <td class="px-4 py-3">{col.Null}</td>
+                                    <td class="px-4 py-3 font-medium text-primary">{col.Key}</td>
+                                    <td class="px-4 py-3 text-muted-foreground">{col.Default === null ? 'NULL' : col.Default}</td>
+                                    <td class="px-4 py-3 text-muted-foreground">{col.Extra}</td>
+                                    <td class="px-4 py-3 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity" style="opacity: 1">
+                                        <button onclick={() => startEditing(col)} class="p-1 text-muted-foreground hover:text-primary transition-colors" title="Edit">
+                                            <Edit2 class="w-4 h-4" />
+                                        </button>
+                                        <button onclick={() => handleDropInline(col.Field)} class="p-1 text-muted-foreground hover:text-destructive transition-colors" title="Drop">
+                                            <Trash2 class="w-4 h-4" />
+                                        </button>
+                                    </td>
+                                {/if}
                             </tr>
                         {/each}
                         {#if structure.length === 0}
                             <tr>
-                                <td colspan="6" class="px-4 py-8 text-center text-muted-foreground">
+                                <td colspan="7" class="px-4 py-8 text-center text-muted-foreground">
                                     Loading structure...
                                 </td>
                             </tr>
@@ -145,18 +189,6 @@
                     onclick={() => activeSection = 'addCol'}
                 >
                     Add Column
-                </button>
-                <button 
-                    class="px-3 py-1.5 text-sm font-medium rounded-md transition-colors {activeSection === 'modifyCol' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:bg-background/50'}"
-                    onclick={() => activeSection = 'modifyCol'}
-                >
-                    Modify Column
-                </button>
-                <button 
-                    class="px-3 py-1.5 text-sm font-medium rounded-md transition-colors {activeSection === 'dropCol' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:bg-background/50'}"
-                    onclick={() => activeSection = 'dropCol'}
-                >
-                    Drop Column
                 </button>
             </div>
 
@@ -197,65 +229,6 @@
                             <button type="submit" class="ml-auto inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-9 px-4 py-2">
                                 <Plus class="w-4 h-4 mr-2" />
                                 Add Column
-                            </button>
-                        </div>
-                    </form>
-                {/if}
-
-                {#if activeSection === 'modifyCol'}
-                    <form onsubmit={handleModifyColumn} class="flex flex-col gap-4">
-                        <div class="grid grid-cols-3 gap-4">
-                            <div class="flex flex-col gap-1.5">
-                                <label class="text-xs font-medium">Column to Modify</label>
-                                <select bind:value={modifyColumnName} class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" required>
-                                    <option value="">Select Column</option>
-                                    {#each structure as col}
-                                        <option value={col.Field}>{col.Field}</option>
-                                    {/each}
-                                </select>
-                            </div>
-                            <div class="flex flex-col gap-1.5">
-                                <label class="text-xs font-medium">New Data Type</label>
-                                <select bind:value={modifyColumnType} class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" required>
-                                    <option value="">Select Type</option>
-                                    <option>INT</option><option>BIGINT</option><option>VARCHAR(255)</option>
-                                    <option>TEXT</option><option>DATE</option><option>DATETIME</option>
-                                    <option>BOOLEAN</option><option>JSON</option>
-                                </select>
-                            </div>
-                            <div class="flex flex-col gap-1.5">
-                                <label class="text-xs font-medium">Default Value</label>
-                                <input type="text" bind:value={modifyColumnDefault} class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" placeholder="NULL" />
-                            </div>
-                        </div>
-                        <div class="flex items-center gap-2">
-                            <label class="flex items-center gap-2 text-sm">
-                                <input type="checkbox" bind:checked={modifyColumnNull} class="rounded border-input text-primary" />
-                                Allow NULL
-                            </label>
-                            <button type="submit" class="ml-auto inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-9 px-4 py-2">
-                                <Edit2 class="w-4 h-4 mr-2" />
-                                Modify Column
-                            </button>
-                        </div>
-                    </form>
-                {/if}
-
-                {#if activeSection === 'dropCol'}
-                    <form onsubmit={handleDropColumn} class="flex flex-col gap-4">
-                        <div class="flex gap-4 items-end">
-                            <div class="flex flex-col gap-1.5 flex-1">
-                                <label class="text-xs font-medium">Column to Drop</label>
-                                <select bind:value={dropColumnName} class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" required>
-                                    <option value="">Select Column</option>
-                                    {#each structure as col}
-                                        <option value={col.Field}>{col.Field}</option>
-                                    {/each}
-                                </select>
-                            </div>
-                            <button type="submit" class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90 h-9 px-4 py-2">
-                                <Trash2 class="w-4 h-4 mr-2" />
-                                Drop Column
                             </button>
                         </div>
                     </form>
