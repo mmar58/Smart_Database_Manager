@@ -9,7 +9,7 @@
   "scripts": {
     "backend": "cd backend && pnpm dev",
     "frontend": "cd frontend && pnpm dev",
-    "dev": "npm run backend:dev && npm run frontend:dev",
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\"",
     "build": "pnpm --filter backend build && pnpm --filter frontend build",
     "start": "pnpm --filter backend start",
     "test": "pnpm --filter backend test",
