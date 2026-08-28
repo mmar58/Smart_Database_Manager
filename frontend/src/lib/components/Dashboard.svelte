@@ -6,6 +6,20 @@
     let sizes: any[] = $state([]);
     let totalMb = $state(0);
 
+    let expandedDb = $state<string | null>(null);
+    let tableSizes = $state<Record<string, { table: string, sizeMb: string }[]>>({});
+
+    function toggleDb(dbName: string) {
+        if (expandedDb === dbName) {
+            expandedDb = null;
+        } else {
+            expandedDb = dbName;
+            if (!tableSizes[dbName]) {
+                socket.emit("get_table_sizes", dbName);
+            }
+        }
+    }
+
     $effect(() => {
         socket.on("db_sizes", (data: any[]) => {
             sizes = data;
@@ -15,6 +29,10 @@
             );
         });
 
+        socket.on("table_sizes", (data: { database: string, sizes: any[] }) => {
+            tableSizes[data.database] = data.sizes;
+        });
+
         // Request sizes on mount if we have a connection
         if (appState.isConnected) {
             socket.emit("get_db_sizes");
@@ -22,6 +40,7 @@
 
         return () => {
             socket.off("db_sizes");
+            socket.off("table_sizes");
         };
     });
 </script>
@@ -69,48 +88,72 @@
     </div>
 
     <!-- Database Sizes -->
-    <div class="bg-card border rounded-xl shadow-sm flex flex-col">
-        <div class="p-4 border-b font-semibold">Database Sizes</div>
-        <div class="p-4 flex flex-col gap-3">
+    <div class="bg-card border rounded-xl shadow-sm flex flex-col flex-1 min-h-0">
+        <div class="p-4 border-b font-semibold flex-shrink-0">Database Sizes</div>
+        <div class="p-4 flex flex-col gap-3 overflow-y-auto min-h-0">
             {#if sizes.length === 0}
                 <div class="text-muted-foreground text-sm italic">
                     Loading size data...
                 </div>
             {/if}
             {#each sizes as db}
-                <div class="flex items-center gap-4 text-sm">
-                    <div
-                        class="w-1/3 truncate font-medium flex items-center gap-2"
-                    >
-                        <Database size={14} class="text-primary" />
-                        {db.database}
-                    </div>
-                    <div
-                        class="flex-1 bg-secondary rounded-full h-2 overflow-hidden"
+                <div class="flex flex-col border-b last:border-0 pb-2 mb-2 last:pb-0 last:mb-0">
+                    <button 
+                        class="flex items-center gap-4 text-sm hover:bg-muted/30 p-2 rounded transition-colors w-full text-left"
+                        onclick={() => toggleDb(db.database)}
                     >
                         <div
-                            class="bg-primary h-full"
-                            style="width: {Math.max(
-                                ...sizes.map(
-                                    (s: any) => parseFloat(s.sizeMb) || 0,
-                                ),
-                            ) > 0
-                                ? (parseFloat(db.sizeMb) /
-                                      Math.max(
-                                          ...sizes.map(
-                                              (s: any) =>
-                                                  parseFloat(s.sizeMb) || 0,
-                                          ),
-                                      )) *
-                                  100
-                                : 0}%"
-                        ></div>
-                    </div>
-                    <div
-                        class="w-24 text-right tabular-nums text-muted-foreground"
-                    >
-                        {db.sizeMb} MB
-                    </div>
+                            class="w-1/3 truncate font-medium flex items-center gap-2"
+                        >
+                            <Database size={14} class="text-primary" />
+                            {db.database}
+                        </div>
+                        <div
+                            class="flex-1 bg-secondary rounded-full h-2 overflow-hidden"
+                        >
+                            <div
+                                class="bg-primary h-full transition-all duration-500"
+                                style="width: {Math.max(...sizes.map((s: any) => parseFloat(s.sizeMb) || 0)) > 0
+                                    ? (parseFloat(db.sizeMb) / Math.max(...sizes.map((s: any) => parseFloat(s.sizeMb) || 0))) * 100
+                                    : 0}%"
+                            ></div>
+                        </div>
+                        <div
+                            class="w-24 text-right tabular-nums text-muted-foreground font-medium"
+                        >
+                            {db.sizeMb} MB
+                        </div>
+                    </button>
+
+                    {#if expandedDb === db.database}
+                        <div class="ml-6 mt-2 pl-4 border-l flex flex-col gap-2">
+                            {#if !tableSizes[db.database]}
+                                <div class="text-xs text-muted-foreground italic p-2">Loading tables...</div>
+                            {:else if tableSizes[db.database].length === 0}
+                                <div class="text-xs text-muted-foreground italic p-2">No tables found.</div>
+                            {:else}
+                                {#each [...tableSizes[db.database]].sort((a, b) => parseFloat(b.sizeMb) - parseFloat(a.sizeMb)) as table}
+                                    <div class="flex items-center gap-4 text-xs p-1 rounded hover:bg-muted/20">
+                                        <div class="w-1/3 truncate flex items-center gap-2">
+                                            <Table size={12} class="text-success" />
+                                            <span class="text-muted-foreground">{table.table}</span>
+                                        </div>
+                                        <div class="flex-1 bg-secondary rounded-full h-1.5 overflow-hidden">
+                                            <div
+                                                class="bg-success/70 h-full transition-all duration-500"
+                                                style="width: {Math.max(...tableSizes[db.database].map((s: any) => parseFloat(s.sizeMb) || 0)) > 0
+                                                    ? (parseFloat(table.sizeMb) / Math.max(...tableSizes[db.database].map((s: any) => parseFloat(s.sizeMb) || 0))) * 100
+                                                    : 0}%"
+                                            ></div>
+                                        </div>
+                                        <div class="w-24 text-right tabular-nums text-muted-foreground/70">
+                                            {table.sizeMb} MB
+                                        </div>
+                                    </div>
+                                {/each}
+                            {/if}
+                        </div>
+                    {/if}
                 </div>
             {/each}
         </div>
