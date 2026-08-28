@@ -27,8 +27,4 @@ export default defineConfig({
       '/backups': 'http://localhost:3000',
     },
   },
-  build: {
-    outDir: path.resolve(__dirname, '../backend/src/public'),
-    emptyOutDir: true,
-  },
 });
