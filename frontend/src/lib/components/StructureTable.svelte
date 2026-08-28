@@ -35,8 +35,10 @@
     });
 
     onMount(() => {
-        socket.on("table_structure", (data: TableColumn[]) => {
-            structure = data;
+        socket.on("table_structure", (data: { database: string; table: string; structure: TableColumn[] }) => {
+            if (data.database === appState.currentDatabase && data.table === appState.currentTable) {
+                structure = data.structure || [];
+            }
         });
 
         return () => {
