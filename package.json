@@ -1,31 +1,22 @@
 {
   "name": "mysql_handler",
-  "version": "1.0.0",
-  "description": "To handle your mysql database",
+  "version": "2.0.0",
+  "description": "Database Manager — TypeScript edition",
+  "private": true,
   "license": "MIT",
   "author": "mmar58",
-  "type": "commonjs",
-  "main": "src/server.js",
+  "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "dependencies": {
-    "archiver": "^7.0.1",
-    "cors": "^2.8.5",
-    "dotenv": "^16.6.1",
-    "express": "^4.18.2",
-    "express-session": "^1.18.2",
-    "jsonwebtoken": "^9.0.3",
-    "multer": "^2.2.0",
-    "mysql2": "^3.6.0",
-    "node-cron": "^4.6.0",
-    "os-utils": "^0.0.14",
-    "pg": "^8.20.0",
-    "socket.io": "^4.7.2"
+    "backend": "cd backend && pnpm dev",
+    "frontend": "cd frontend && pnpm dev",
+    "dev": "npm run backend:dev && npm run frontend:dev",
+    "build": "pnpm --filter backend build && pnpm --filter frontend build",
+    "start": "pnpm --filter backend start",
+    "test": "pnpm --filter backend test",
+    "test:coverage": "pnpm --filter backend test:coverage"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.1.14"
   }
 }

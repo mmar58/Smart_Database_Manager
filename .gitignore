@@ -1,3 +1,10 @@
 node_modules
 .env
 /data
+/backups
+/backend/dist
+/backend/src/public
+/frontend/src/public
+*.enc
+.salt
+coverage
