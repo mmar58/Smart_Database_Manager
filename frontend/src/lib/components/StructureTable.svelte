@@ -24,15 +24,17 @@
     let editDefault = $state("");
     let editNull = $state(false);
 
-    onMount(() => {
-        // Initial load if structure was requested
+    $effect(() => {
+        // Trigger structure fetch when table changes
         if (appState.currentDatabase && appState.currentTable) {
             socket.emit("get_table_structure", { 
                 database: appState.currentDatabase, 
                 table: appState.currentTable 
             });
         }
+    });
 
+    onMount(() => {
         socket.on("table_structure", (data: TableColumn[]) => {
             structure = data;
         });

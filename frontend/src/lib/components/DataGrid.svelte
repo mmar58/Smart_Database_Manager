@@ -44,7 +44,27 @@
         loadData();
     }
 
+    $effect(() => {
+        // Auto-fetch data when relevant state changes
+        if (appState.currentDatabase && appState.currentTable) {
+            const offset = (appState.currentPage - 1) * appState.pageSize;
+            socket.emit("get_table_data", {
+                database: appState.currentDatabase,
+                table: appState.currentTable,
+                limit: appState.pageSize,
+                offset,
+                sortColumn: appState.currentSortColumn,
+                sortDirection: appState.currentSortDirection,
+                searchFilters: appState.currentSearchFilters.length
+                    ? appState.currentSearchFilters
+                    : null,
+                searchLogic: appState.currentSearchLogic,
+            });
+        }
+    });
+
     function loadData() {
+        // This can be kept for manual refresh if needed, but the $effect handles automatic fetching
         if (!appState.currentDatabase || !appState.currentTable) return;
         const offset = (appState.currentPage - 1) * appState.pageSize;
         socket.emit("get_table_data", {
