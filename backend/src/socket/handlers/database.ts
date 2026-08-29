@@ -221,6 +221,48 @@ export function registerDatabaseHandlers(
   );
 
   socket.on(
+    'truncate_table',
+    async ({ database, table }: { database: string; table: string }) => {
+      const db = activeConnections.get(socket.id);
+      if (!db) return socket.emit('error', { message: 'No active connection' });
+      try {
+        await db.deleteAllData(database, table);
+        socket.emit('table_truncated', { message: `Table '${table}' truncated` });
+      } catch (e) {
+        socket.emit('error', { message: (e as Error).message });
+      }
+    },
+  );
+
+  socket.on(
+    'duplicate_table',
+    async ({ database, table, newTable }: { database: string; table: string; newTable: string }) => {
+      const db = activeConnections.get(socket.id);
+      if (!db) return socket.emit('error', { message: 'No active connection' });
+      try {
+        await db.duplicateTable(database, table, newTable);
+        socket.emit('table_duplicated', { message: `Table duplicated to '${newTable}'` });
+      } catch (e) {
+        socket.emit('error', { message: (e as Error).message });
+      }
+    },
+  );
+
+  socket.on(
+    'duplicate_database',
+    async ({ database, newDatabase }: { database: string; newDatabase: string }) => {
+      const db = activeConnections.get(socket.id);
+      if (!db) return socket.emit('error', { message: 'No active connection' });
+      try {
+        await db.duplicateDatabase(database, newDatabase);
+        socket.emit('database_duplicated', { message: `Database duplicated to '${newDatabase}'` });
+      } catch (e) {
+        socket.emit('error', { message: (e as Error).message });
+      }
+    },
+  );
+
+  socket.on(
     'get_row_count',
     async ({
       database,

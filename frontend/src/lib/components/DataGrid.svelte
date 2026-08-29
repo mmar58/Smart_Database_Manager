@@ -1,13 +1,21 @@
 <script lang="ts">
     import { appState } from "$lib/state.svelte";
     import { socket } from "$lib/services/socket";
-    import { ArrowUp, ArrowDown } from "@lucide/svelte";
+    import { ArrowUp, ArrowDown, Edit2, Copy, Trash2 } from "@lucide/svelte";
+    import ContextMenu from "./ContextMenu.svelte";
 
     // We expect the backend to send the table data over socket
     // Alternatively, we could have state.ts store it, but let's keep it here for now
     let data = $state<any[]>([]);
     let columns = $state<string[]>([]);
     let selectedRows = $state<number[]>([]);
+    
+    let contextMenu = $state<{
+        show: boolean;
+        x: number;
+        y: number;
+        options: any[];
+    }>({ show: false, x: 0, y: 0, options: [] });
 
     $effect(() => {
         const handleData = (payload: {
@@ -95,6 +103,56 @@
             selectedRows = selectedRows.filter((r: number) => r !== i);
         } else {
             selectedRows = [...selectedRows, i];
+        }
+    }
+
+    function handleRowContextMenu(e: MouseEvent, row: any, index: number) {
+        e.preventDefault();
+        // Fallback to the first column as PK if none defined by user
+        const pkColumn = columns[0]; 
+        const pkValue = row[pkColumn];
+        
+        contextMenu = {
+            show: true,
+            x: e.clientX,
+            y: e.clientY,
+            options: [
+                { label: "Edit Row", icon: Edit2, action: () => editRow(row, pkColumn, pkValue) },
+                { label: "Duplicate Row", icon: Copy, action: () => duplicateRow(row) },
+                { label: "Delete Row", icon: Trash2, class: "text-destructive", action: () => deleteRow(pkColumn, pkValue) }
+            ]
+        };
+    }
+
+    function editRow(row: any, pkCol: string, pkVal: any) {
+        // Implement row edit modal/action
+        alert("Edit row functionality requires a modal. PK: " + pkCol + " = " + pkVal);
+    }
+
+    function duplicateRow(row: any) {
+        // Strip auto-increment keys if possible, then insert
+        // For now, just send the whole row as insert (it might fail if PK is auto-increment but included)
+        const newRow = { ...row };
+        // Basic heuristic to remove 'id' if it's the first column
+        if (columns[0].toLowerCase() === 'id') delete newRow[columns[0]];
+        
+        if (appState.currentDatabase && appState.currentTable) {
+            socket.emit("insert_row", { database: appState.currentDatabase, table: appState.currentTable, rowData: newRow });
+        }
+    }
+
+    function deleteRow(pkCol: string, pkVal: any) {
+        if (confirm("Delete this row?")) {
+            if (appState.currentDatabase && appState.currentTable) {
+                socket.emit("delete_selected_data", { 
+                    database: appState.currentDatabase, 
+                    table: appState.currentTable, 
+                    targetColumn: pkCol, 
+                    targetValues: [pkVal] 
+                });
+                // We could reload data here or rely on socket broadcast
+                setTimeout(loadData, 500); 
+            }
         }
     }
 </script>
@@ -201,6 +259,7 @@
                             )
                                 ? 'bg-primary/5'
                                 : ''}"
+                            oncontextmenu={(e) => handleRowContextMenu(e, row, i)}
                         >
                             <td class="px-4 py-2">
                                 <input
@@ -243,3 +302,12 @@
         </table>
     </div>
 </div>
+
+{#if contextMenu.show}
+    <ContextMenu
+        x={contextMenu.x}
+        y={contextMenu.y}
+        options={contextMenu.options}
+        onClose={() => (contextMenu.show = false)}
+    />
+{/if}

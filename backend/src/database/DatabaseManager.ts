@@ -568,6 +568,14 @@ export class DatabaseManager {
     }
   }
 
+  async duplicateDatabase(databaseName: string, newDatabaseName: string): Promise<void> {
+    if (!this.connection) throw new Error('No database connection');
+    
+    await this.createDatabase(newDatabaseName);
+    const dump = await this.exportDatabase(databaseName, { format: 'sql', includeData: true });
+    await this.importDatabase(newDatabaseName, dump);
+  }
+
   async createTable(databaseName: string, createTableQuery: string): Promise<void> {
     if (!this.connection) throw new Error('No database connection');
     if (this.engine === 'postgresql') {
@@ -599,6 +607,21 @@ export class DatabaseManager {
       await conn.query(
         `DROP TABLE ${conn.escapeId(databaseName)}.${conn.escapeId(tableName)}`,
       );
+    }
+  }
+
+  async duplicateTable(databaseName: string, tableName: string, newTableName: string): Promise<void> {
+    if (!this.connection) throw new Error('No database connection');
+    if (this.engine === 'postgresql') {
+      const client = await this._pgGetClient(databaseName);
+      try {
+        await client.query(`CREATE TABLE ${this._pgEscapeId('public')}.${this._pgEscapeId(newTableName)} (LIKE ${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)} INCLUDING ALL)`);
+        await client.query(`INSERT INTO ${this._pgEscapeId('public')}.${this._pgEscapeId(newTableName)} SELECT * FROM ${this._pgEscapeId('public')}.${this._pgEscapeId(tableName)}`);
+      } finally { await client.end(); }
+    } else {
+      const conn = this.mysqlConn;
+      await conn.query(`CREATE TABLE ${conn.escapeId(databaseName)}.${conn.escapeId(newTableName)} LIKE ${conn.escapeId(databaseName)}.${conn.escapeId(tableName)}`);
+      await conn.query(`INSERT INTO ${conn.escapeId(databaseName)}.${conn.escapeId(newTableName)} SELECT * FROM ${conn.escapeId(databaseName)}.${conn.escapeId(tableName)}`);
     }
   }
 
