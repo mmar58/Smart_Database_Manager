@@ -573,7 +573,7 @@ export class DatabaseManager {
     
     await this.createDatabase(newDatabaseName);
     const dump = await this.exportDatabase(databaseName, { format: 'sql', includeData: true });
-    await this.importDatabase(newDatabaseName, dump);
+    await this.importDatabase(newDatabaseName, dump.content as string);
   }
 
   async createTable(databaseName: string, createTableQuery: string): Promise<void> {
