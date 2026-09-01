@@ -149,7 +149,11 @@ class DatabaseManager {
                             c.data_type AS "Type",
                             c.is_nullable AS "Null",
                             c.column_default AS "Default",
-                            CASE WHEN pk.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS "Key",
+                            CASE 
+                                WHEN pk.column_name IS NOT NULL THEN 'PRI' 
+                                WHEN uk.column_name IS NOT NULL THEN 'UNI'
+                                ELSE '' 
+                            END AS "Key",
                             '' AS "Extra"
                          FROM information_schema.columns c
                          LEFT JOIN (
@@ -163,6 +167,17 @@ class DatabaseManager {
                                AND tc.table_schema = 'public'
                                AND tc.table_name = $1
                          ) pk ON c.column_name = pk.column_name
+                         LEFT JOIN (
+                             SELECT ku.column_name
+                             FROM information_schema.table_constraints tc
+                             JOIN information_schema.key_column_usage ku
+                                 ON tc.constraint_name = ku.constraint_name
+                                 AND tc.table_schema = ku.table_schema
+                                 AND tc.table_name = ku.table_name
+                             WHERE tc.constraint_type = 'UNIQUE'
+                               AND tc.table_schema = 'public'
+                               AND tc.table_name = $1
+                         ) uk ON c.column_name = uk.column_name
                          WHERE c.table_schema = 'public' AND c.table_name = $1
                          ORDER BY c.ordinal_position`,
                         [tableName]

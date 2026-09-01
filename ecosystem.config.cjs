@@ -2,7 +2,7 @@ module.exports = {
     apps: [
         {
             name: "mysql-manager",
-            script: "src/server.js",
+            script: "backend/dist/index.js",
             watch: false,
             env: {
                 NODE_ENV: "development",
