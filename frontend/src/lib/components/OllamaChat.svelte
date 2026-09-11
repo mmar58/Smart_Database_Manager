@@ -1,7 +1,7 @@
 <script lang="ts">
-    import { appState, saveOllamaState } from '$lib/state.svelte';
+    import { appState, saveOllamaState, saveSettings, fetchOllamaModels } from '$lib/state.svelte';
     import { socket } from '$lib/services/socket';
-    import { MessageSquare, Maximize2, Minimize2, X, Send, Bot, ArrowRightLeft, SquareTerminal, PanelRightClose, PanelRightOpen, Plus, Trash2, StopCircle, Zap } from '@lucide/svelte';
+    import { MessageSquare, Maximize2, Minimize2, X, Send, Bot, ArrowRightLeft, SquareTerminal, PanelRightClose, PanelRightOpen, Plus, Trash2, StopCircle, Zap, Settings } from '@lucide/svelte';
     import { encode } from 'gpt-tokenizer';
     import FloatingQuery from './FloatingQuery.svelte';
     import { onMount, onDestroy } from "svelte";
@@ -9,6 +9,7 @@
     // UI state
     let isMinimized = $state(false);
     let showSessionList = $state(false);
+    let showSettings = $state(false);
     let x = $state(window.innerWidth - 420);
     let y = $state(100);
 
@@ -447,6 +448,9 @@ You can use tools to run queries, get schema, or write to the editor. If you are
             </div>
             
             <div class="flex items-center gap-1">
+                <button class="p-1.5 hover:bg-muted rounded text-muted-foreground transition-colors" onclick={() => showSettings = !showSettings} title="Settings">
+                    <Settings class="w-4 h-4" />
+                </button>
                 <button class="p-1.5 hover:bg-muted rounded text-muted-foreground transition-colors" onclick={() => showSessionList = !showSessionList} title="History">
                     <MessageSquare class="w-4 h-4" />
                 </button>

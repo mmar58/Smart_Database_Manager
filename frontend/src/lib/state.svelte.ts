@@ -40,7 +40,8 @@ export const appState = $state({
         isOpen: false,
         layout: 'floating',
         sessions: [],
-        currentSessionId: null
+        currentSessionId: null,
+        models: [] as string[]
     } as import('./types').OllamaAssistantState,
     
     // Notifications
@@ -119,4 +120,20 @@ export function saveSettings(newSettings: Partial<AppSettings>) {
 
 export function notifyStateChanged() {
     // No-op in Svelte 5 since $state is deeply reactive!
+}
+
+export async function fetchOllamaModels() {
+    const url = appState.settings?.ollamaApiUrl || 'http://localhost:11434';
+    try {
+        const res = await fetch(`${url}/api/tags`);
+        if (res.ok) {
+            const data = await res.json();
+            appState.ollama.models = data.models.map((m: any) => m.name);
+            if (!appState.settings.ollamaModel && appState.ollama.models.length > 0) {
+                saveSettings({ ollamaModel: appState.ollama.models[0] });
+            }
+        }
+    } catch (e) {
+        console.error("Failed to fetch Ollama models", e);
+    }
 }

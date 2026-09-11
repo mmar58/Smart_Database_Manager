@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
     import { socket } from "$lib/services/socket";
-    import { appState } from "$lib/state.svelte";
+    import { appState, fetchOllamaModels, saveSettings } from "$lib/state.svelte";
     import { Play, Code, Clock, Trash2, Bot } from "@lucide/svelte";
     import { EditorState } from "@codemirror/state";
     import { EditorView, keymap } from "@codemirror/view";
@@ -122,6 +122,7 @@
             results = null;
             columns = [];
             executionTime = "";
+            fetchOllamaModels();
         });
 
         socket.on("query_info", (msg: string) => {
@@ -203,9 +204,24 @@
                     class="p-4 m-4 bg-destructive/10 text-destructive border border-destructive/20 rounded-md text-sm font-mono whitespace-pre-wrap flex flex-col gap-3"
                 >
                     <div>{error}</div>
-                    <button class="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 text-primary font-medium rounded transition-colors flex items-center gap-1 self-start cursor-pointer" onclick={askOllamaForHelp}>
-                        <Bot size={14} /> Ask Ollama
-                    </button>
+                    <div class="flex items-center gap-2 mt-2">
+                        <select
+                            class="bg-background text-foreground border rounded px-2 py-1 text-xs"
+                            value={appState.settings.ollamaModel}
+                            onchange={(e) => saveSettings({ ollamaModel: e.currentTarget.value })}
+                        >
+                            {#if appState.ollama.models.length === 0}
+                                <option value="">Loading models...</option>
+                            {:else}
+                                {#each appState.ollama.models as model}
+                                    <option value={model}>{model}</option>
+                                {/each}
+                            {/if}
+                        </select>
+                        <button class="px-3 py-1 text-xs bg-primary/10 hover:bg-primary/20 text-primary font-medium rounded transition-colors flex items-center gap-1 cursor-pointer" onclick={askOllamaForHelp}>
+                            <Bot size={14} /> Ask Ollama
+                        </button>
+                    </div>
                 </div>
             {/if}
 

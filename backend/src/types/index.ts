@@ -23,6 +23,10 @@ export interface DbCredentials {
   password?: string;
   database?: string;
   ssl?: SslConfig | boolean | undefined;
+  sslCa?: string;
+  sslCert?: string;
+  sslKey?: string;
+  rejectUnauthorized?: boolean;
   engine?: DatabaseEngine;
   connectTimeout?: number;
 }

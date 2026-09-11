@@ -68,6 +68,7 @@ export interface OllamaAssistantState {
     layout: 'floating' | 'sidebar';
     sessions: OllamaChatSession[];
     currentSessionId: string | null;
+    models: string[];
 }
 
 export interface BackupProfile {

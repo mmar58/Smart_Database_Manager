@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { appState, addNotification, updateNotification } from "$lib/state.svelte";
+    import { appState, addNotification, updateNotification, fetchOllamaModels, saveSettings } from "$lib/state.svelte";
     import { X, Upload, File as FileIcon, AlertCircle, Download, Bot } from "@lucide/svelte";
     import { scale, fade } from "svelte/transition";
     import { socket } from "$lib/services/socket";
@@ -91,6 +91,7 @@
             importError = errMsg;
             importErrorContent = content;
             cleanup();
+            fetchOllamaModels();
         };
         
         const cleanup = () => {
@@ -241,6 +242,19 @@
                         </div>
                         
                         <div class="flex items-center gap-2 mt-4 flex-wrap">
+                            <select
+                                class="bg-background text-foreground border rounded px-2 py-1 text-xs"
+                                value={appState.settings.ollamaModel}
+                                onchange={(e) => saveSettings({ ollamaModel: e.currentTarget.value })}
+                            >
+                                {#if appState.ollama.models.length === 0}
+                                    <option value="">Loading models...</option>
+                                {:else}
+                                    {#each appState.ollama.models as model}
+                                        <option value={model}>{model}</option>
+                                    {/each}
+                                {/if}
+                            </select>
                             <button class="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 text-primary font-medium rounded transition-colors flex items-center gap-1" onclick={askOllamaForHelp} disabled={isImporting}>
                                 <Bot size={14} /> Ask Ollama
                             </button>

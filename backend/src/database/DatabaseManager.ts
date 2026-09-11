@@ -18,12 +18,29 @@ import type {
 // ─── Internal normalised SSL config ───────────────────────────────────────────
 
 function buildSslConfig(
-  ssl: DbCredentials['ssl'],
+  credentials: DbCredentials,
 ): Record<string, unknown> | undefined {
+  let ssl = credentials.ssl;
+
+  if (
+    ssl === undefined &&
+    (credentials.sslCa ||
+      credentials.sslCert ||
+      credentials.sslKey ||
+      credentials.rejectUnauthorized !== undefined)
+  ) {
+    ssl = {
+      ca: credentials.sslCa,
+      cert: credentials.sslCert,
+      key: credentials.sslKey,
+      rejectUnauthorized: credentials.rejectUnauthorized,
+    };
+  }
+
   if (!ssl) return undefined;
   if (typeof ssl === 'boolean') return ssl ? {} : undefined;
   const cfg: Record<string, unknown> = {
-    rejectUnauthorized: ssl.rejectUnauthorized !== false,
+    rejectUnauthorized: (ssl as SslConfig).rejectUnauthorized !== false,
   };
   if ((ssl as SslConfig).ca) cfg['ca'] = (ssl as SslConfig).ca;
   if ((ssl as SslConfig).cert) cfg['cert'] = (ssl as SslConfig).cert;
@@ -67,7 +84,7 @@ export class DatabaseManager {
     this.engine =
       credentials.engine === 'postgresql' ? 'postgresql' : 'mysql';
 
-    const sslConfig = buildSslConfig(credentials.ssl);
+    const sslConfig = buildSslConfig(credentials);
 
     this.pgBaseConfig = {
       host: credentials.host ?? 'localhost',
@@ -96,7 +113,7 @@ export class DatabaseManager {
   /** Create a pg.Client connected to the given database. */
   public async _pgGetClient(database?: string): Promise<PgClient> {
     const dbName =
-      database ?? this.mysqlConfig.database ?? 'postgres';
+      database || this.mysqlConfig.database || 'postgres';
     const client = new PgClient({ ...this.pgBaseConfig, database: dbName });
     await client.connect();
     return client;
