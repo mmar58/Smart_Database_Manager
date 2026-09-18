@@ -114,9 +114,21 @@ export class DatabaseManager {
   public async _pgGetClient(database?: string): Promise<PgClient> {
     const dbName =
       database || this.mysqlConfig.database || 'postgres';
-    const client = new PgClient({ ...this.pgBaseConfig, database: dbName });
-    await client.connect();
-    return client;
+    let client = new PgClient({ ...this.pgBaseConfig, database: dbName });
+    
+    try {
+      await client.connect();
+      return client;
+    } catch (err: any) {
+      if (err && err.message === 'The server does not support SSL connections' && this.pgBaseConfig.ssl) {
+        console.warn('PostgreSQL server does not support SSL. Retrying without SSL...');
+        delete this.pgBaseConfig.ssl;
+        client = new PgClient({ ...this.pgBaseConfig, database: dbName });
+        await client.connect();
+        return client;
+      }
+      throw err;
+    }
   }
 
   /** Double-quote a PostgreSQL identifier safely. */
