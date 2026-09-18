@@ -269,6 +269,7 @@
             bind:user
             bind:password
             bind:database
+            {engine}
         />
 
         <SslOptions
