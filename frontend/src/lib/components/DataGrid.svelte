@@ -288,10 +288,12 @@
                             <td class="px-4 py-2 whitespace-nowrap">
                                 <button
                                     class="text-xs text-primary hover:underline mr-2"
+                                    onclick={() => editRow(row, columns[0], row[columns[0]])}
                                     >Edit</button
                                 >
                                 <button
                                     class="text-xs text-destructive hover:underline"
+                                    onclick={() => deleteRow(columns[0], row[columns[0]])}
                                     >Del</button
                                 >
                             </td>

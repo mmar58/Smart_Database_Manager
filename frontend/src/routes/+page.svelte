@@ -80,9 +80,9 @@
 		>
 			<!-- Topbar Component -->
 			<header
-				class="h-14 border-b bg-card grid grid-cols-3 items-center px-4 shrink-0 shadow-sm"
+				class="h-14 border-b bg-card flex justify-between gap-4 items-center px-4 shrink-0 shadow-sm overflow-x-auto"
 			>
-				<div class="flex items-center gap-2 justify-start">
+				<div class="flex items-center gap-2 justify-start shrink-0">
 					<span class="font-semibold text-lg"
 						>{appState.currentDatabase || "Select a Database"}</span
 					>
@@ -94,13 +94,13 @@
 					{/if}
 				</div>
 
-				<div class="flex justify-center items-center w-full min-w-0">
+				<div class="flex-1 flex justify-center items-center min-w-0">
 					{#if appState.currentDatabase || appState.isConnected}
 						<GlobalOptionsMenu />
 					{/if}
 				</div>
 
-				<div class="flex items-center justify-end gap-4 text-sm font-medium">
+				<div class="flex items-center justify-end gap-2 text-sm font-medium shrink-0">
 					<button
 						class="text-muted-foreground hover:text-foreground {appState.activeTab ===
 						'query'
