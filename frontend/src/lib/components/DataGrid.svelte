@@ -4,6 +4,21 @@
     import { ArrowUp, ArrowDown, Edit2, Copy, Trash2 } from "@lucide/svelte";
     import ContextMenu from "./ContextMenu.svelte";
     import Modal from "./Modal.svelte";
+    import ExportModal from "./ExportModal.svelte";
+    import ImportModal from "./ImportModal.svelte";
+
+    let showExportModal = $state(false);
+    let showImportModal = $state(false);
+
+    function handleExport(level: 'server' | 'database' | 'table', db: string | null, tbl: string | null, options: any) {
+        if (level === 'server') {
+            socket.emit("export_server", { options }); 
+        } else if (level === 'table' && db && tbl) {
+            socket.emit("export_table", { database: db, table: tbl, options });
+        } else if (level === 'database' && db) {
+            socket.emit("export_database", { database: db, options });
+        }
+    }
 
     // We expect the backend to send the table data over socket
     // Alternatively, we could have state.ts store it, but let's keep it here for now
@@ -199,15 +214,16 @@
     <!-- Toolbar -->
     <div class="p-2 border-b flex items-center justify-between bg-muted/30">
         <div class="flex items-center gap-2">
+            <button class="btn btn-sm btn-secondary text-xs">Filter</button>
+            <button class="btn btn-sm btn-secondary text-xs">Sort</button>
+            <button class="btn btn-sm btn-secondary text-xs" onclick={() => showImportModal = true}>Import</button>
+            <button class="btn btn-sm btn-secondary text-xs" onclick={() => showExportModal = true}>Export</button>
             {#if selectedRows.length > 0}
-                <span class="text-xs font-medium mr-2 bg-primary/10 text-primary px-2 py-1 rounded">{selectedRows.length} selected</span>
+                <div class="w-px h-4 bg-border mx-1"></div>
+                <span class="text-xs font-medium bg-primary/10 text-primary px-2 py-1 rounded">{selectedRows.length} selected</span>
                 <button class="btn btn-sm btn-secondary text-xs text-destructive hover:bg-destructive/10" onclick={deleteSelectedRows}>
                     <Trash2 size={14} class="mr-1 inline"/> Delete Selected
                 </button>
-            {:else}
-                <button class="btn btn-sm btn-secondary text-xs">Filter</button>
-                <button class="btn btn-sm btn-secondary text-xs">Sort</button>
-                <button class="btn btn-sm btn-secondary text-xs">Export</button>
             {/if}
         </div>
         <div class="text-xs text-muted-foreground flex items-center gap-2">
@@ -379,3 +395,20 @@
         {/if}
     </div>
 </Modal>
+
+<ExportModal 
+    show={showExportModal} 
+    initialDatabase={appState.currentDatabase}
+    initialTable={appState.currentTable}
+    selectedPKValues={selectedRows.length > 0 ? selectedRows.map(i => data[i][columns[0]]) : null}
+    pkColumn={selectedRows.length > 0 ? columns[0] : null}
+    onClose={() => showExportModal = false}
+    onExport={handleExport}
+/>
+
+{#if showImportModal}
+<ImportModal
+    show={showImportModal}
+    onClose={() => showImportModal = false}
+/>
+{/if}

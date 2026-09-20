@@ -6,12 +6,14 @@
     export let show: boolean;
     export let initialDatabase: string | null = null;
     export let initialTable: string | null = null;
+    export let selectedPKValues: unknown[] | null = null;
+    export let pkColumn: string | null = null;
     export let onClose: () => void;
     export let onExport: (level: 'server'|'database'|'table', db: string | null, tbl: string | null, options: ExportOptions) => void;
 
     import { appState } from "$lib/state.svelte";
 
-    let targetLevel: 'server' | 'database' | 'table' = 'server';
+    let targetLevel: 'server' | 'database' | 'table' | 'table_selected' = 'server';
     let selectedDb: string | null = null;
     let selectedTable: string | null = null;
 
@@ -19,7 +21,11 @@
         selectedDb = initialDatabase || appState.currentDatabase;
         selectedTable = initialTable || appState.currentTable;
         if (selectedTable && selectedDb) {
-            targetLevel = 'table';
+            if (selectedPKValues && selectedPKValues.length > 0) {
+                targetLevel = 'table_selected';
+            } else {
+                targetLevel = 'table';
+            }
         } else if (selectedDb) {
             targetLevel = 'database';
         } else {
@@ -44,14 +50,13 @@
             exportMethod: 'single'
         };
 
-        if (targetLevel === 'table') {
+        if (targetLevel === 'table' || targetLevel === 'table_selected') {
             options.selectedTables = selectedTable ? [selectedTable] : null;
-            if (outputStructure === 'split') {
-                options.exportMethod = 'single';
-                options.separateData = true;
-            } else {
-                options.exportMethod = 'single';
-                options.separateData = false;
+            options.exportMethod = 'single';
+            options.separateData = outputStructure === 'split';
+            if (targetLevel === 'table_selected') {
+                options.selectedPKValues = selectedPKValues;
+                options.pkColumn = pkColumn;
             }
         } else {
             if (outputStructure === 'split') {
@@ -63,7 +68,7 @@
             }
         }
 
-        onExport(targetLevel, selectedDb, selectedTable, options);
+        onExport(targetLevel === 'table_selected' ? 'table' : targetLevel, selectedDb, selectedTable, options);
         onClose();
     }
 </script>
@@ -89,6 +94,9 @@
                             <option value="server">Entire Server</option>
                             <option value="database" disabled={!selectedDb}>Database: {selectedDb || 'None selected'}</option>
                             <option value="table" disabled={!selectedTable}>Table: {selectedTable || 'None selected'}</option>
+                            {#if selectedPKValues && selectedPKValues.length > 0}
+                                <option value="table_selected">Table: {selectedTable} ({selectedPKValues.length} Selected Rows)</option>
+                            {/if}
                         </select>
                     </div>
                     <p class="text-[11px] text-muted-foreground mt-1">
@@ -96,8 +104,8 @@
                             Will export all databases.
                         {:else if targetLevel === 'database'}
                             Will export all tables in database `{selectedDb}`.
-                        {:else if targetLevel === 'table'}
-                            Will export the `{selectedTable}` table in `{selectedDb}`.
+                        {:else if targetLevel === 'table' || targetLevel === 'table_selected'}
+                            Will export the `{selectedTable}` table in `{selectedDb}` {#if targetLevel === 'table_selected'}({selectedPKValues?.length} rows){/if}.
                         {/if}
                     </p>
                 </div>
