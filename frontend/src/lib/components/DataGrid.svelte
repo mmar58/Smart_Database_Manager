@@ -176,6 +176,21 @@
             }
         }
     }
+    function deleteSelectedRows() {
+        if (confirm(`Delete ${selectedRows.length} selected rows?`)) {
+            if (appState.currentDatabase && appState.currentTable) {
+                const pkCol = columns[0];
+                const pkValues = selectedRows.map(i => data[i][pkCol]);
+                socket.emit("delete_selected_data", {
+                    database: appState.currentDatabase,
+                    table: appState.currentTable,
+                    targetColumn: pkCol,
+                    targetValues: pkValues
+                });
+                setTimeout(loadData, 500);
+            }
+        }
+    }
 </script>
 
 <div
@@ -184,9 +199,16 @@
     <!-- Toolbar -->
     <div class="p-2 border-b flex items-center justify-between bg-muted/30">
         <div class="flex items-center gap-2">
-            <button class="btn btn-sm btn-secondary text-xs">Filter</button>
-            <button class="btn btn-sm btn-secondary text-xs">Sort</button>
-            <button class="btn btn-sm btn-secondary text-xs">Export</button>
+            {#if selectedRows.length > 0}
+                <span class="text-xs font-medium mr-2 bg-primary/10 text-primary px-2 py-1 rounded">{selectedRows.length} selected</span>
+                <button class="btn btn-sm btn-secondary text-xs text-destructive hover:bg-destructive/10" onclick={deleteSelectedRows}>
+                    <Trash2 size={14} class="mr-1 inline"/> Delete Selected
+                </button>
+            {:else}
+                <button class="btn btn-sm btn-secondary text-xs">Filter</button>
+                <button class="btn btn-sm btn-secondary text-xs">Sort</button>
+                <button class="btn btn-sm btn-secondary text-xs">Export</button>
+            {/if}
         </div>
         <div class="text-xs text-muted-foreground flex items-center gap-2">
             <span>
