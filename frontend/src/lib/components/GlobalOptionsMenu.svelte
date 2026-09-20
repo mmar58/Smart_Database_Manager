@@ -107,7 +107,7 @@
 </script>
 
 <div class="flex items-center justify-center w-full min-w-0 h-full" bind:clientWidth={containerWidth}>
-    <div class="flex items-center gap-1 overflow-hidden" style="max-width: 100%;">
+    <div class="flex items-center gap-1" style="max-width: 100%;">
         {#each visibleActions as action}
             <button 
                 class="flex items-center gap-1.5 px-2.5 py-1.5 bg-secondary/30 hover:bg-secondary text-secondary-foreground rounded-md text-xs font-medium transition-colors whitespace-nowrap flex-shrink-0 {action.class}"

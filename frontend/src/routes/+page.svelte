@@ -80,7 +80,7 @@
 		>
 			<!-- Topbar Component -->
 			<header
-				class="h-14 border-b bg-card flex justify-between gap-4 items-center px-4 shrink-0 shadow-sm overflow-x-auto"
+				class="h-14 border-b bg-card flex justify-between gap-4 items-center px-4 shrink-0 shadow-sm"
 			>
 				<div class="flex items-center gap-2 justify-start shrink-0">
 					<span class="font-semibold text-lg"

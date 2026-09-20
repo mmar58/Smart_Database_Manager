@@ -3,6 +3,7 @@
     import { socket } from "$lib/services/socket";
     import { ArrowUp, ArrowDown, Edit2, Copy, Trash2 } from "@lucide/svelte";
     import ContextMenu from "./ContextMenu.svelte";
+    import Modal from "./Modal.svelte";
 
     // We expect the backend to send the table data over socket
     // Alternatively, we could have state.ts store it, but let's keep it here for now
@@ -16,6 +17,11 @@
         y: number;
         options: any[];
     }>({ show: false, x: 0, y: 0, options: [] });
+
+    let showEditModal = $state(false);
+    let editRowData = $state<any>(null);
+    let editPkColumn = $state("");
+    let editPkValue = $state<any>(null);
 
     $effect(() => {
         const handleData = (payload: {
@@ -125,8 +131,23 @@
     }
 
     function editRow(row: any, pkCol: string, pkVal: any) {
-        // Implement row edit modal/action
-        alert("Edit row functionality requires a modal. PK: " + pkCol + " = " + pkVal);
+        editRowData = { ...row };
+        editPkColumn = pkCol;
+        editPkValue = pkVal;
+        showEditModal = true;
+    }
+
+    function saveEditedRow() {
+        if (!appState.currentDatabase || !appState.currentTable || !editPkColumn) return;
+        socket.emit("update_row", {
+            database: appState.currentDatabase,
+            table: appState.currentTable,
+            primaryKeyColumn: editPkColumn,
+            primaryKeyValue: editPkValue,
+            updateData: editRowData
+        });
+        showEditModal = false;
+        setTimeout(loadData, 500);
     }
 
     function duplicateRow(row: any) {
@@ -313,3 +334,26 @@
         onClose={() => (contextMenu.show = false)}
     />
 {/if}
+
+<Modal bind:isOpen={showEditModal} title="Edit Row">
+    <div class="flex flex-col gap-4">
+        {#if editRowData}
+            {#each columns as col}
+                <div class="flex flex-col gap-1">
+                    <label for="edit-{col}" class="text-sm font-medium">{col}</label>
+                    <input 
+                        id="edit-{col}"
+                        type="text" 
+                        class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                        bind:value={editRowData[col]}
+                        disabled={col === editPkColumn}
+                    />
+                </div>
+            {/each}
+            <div class="flex justify-end gap-2 mt-4">
+                <button class="px-4 py-2 text-sm font-medium rounded-md hover:bg-secondary transition-colors" onclick={() => showEditModal = false}>Cancel</button>
+                <button class="px-4 py-2 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors" onclick={saveEditedRow}>Save Changes</button>
+            </div>
+        {/if}
+    </div>
+</Modal>
