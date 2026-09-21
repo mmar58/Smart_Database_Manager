@@ -9,6 +9,67 @@
 
     let showExportModal = $state(false);
     let showImportModal = $state(false);
+    let showSortModal = $state(false);
+    let showFilterModal = $state(false);
+
+    let tempSortColumn = $state<string | null>(null);
+    let tempSortDirection = $state<'ASC'|'DESC'>('ASC');
+    
+    let tempFilters = $state<any[]>([]);
+    let tempSearchLogic = $state<'AND'|'OR'>('AND');
+
+    function openSortModal() {
+        tempSortColumn = appState.currentSortColumn || (columns.length > 0 ? columns[0] : null);
+        tempSortDirection = appState.currentSortDirection;
+        showSortModal = true;
+    }
+
+    function applySort() {
+        appState.currentSortColumn = tempSortColumn;
+        appState.currentSortDirection = tempSortDirection;
+        appState.currentPage = 1;
+        showSortModal = false;
+        loadData();
+    }
+    
+    function clearSort() {
+        appState.currentSortColumn = null;
+        appState.currentPage = 1;
+        showSortModal = false;
+        loadData();
+    }
+
+    function openFilterModal() {
+        tempFilters = JSON.parse(JSON.stringify(appState.currentSearchFilters));
+        tempSearchLogic = appState.currentSearchLogic;
+        if (tempFilters.length === 0) {
+            addFilter();
+        }
+        showFilterModal = true;
+    }
+
+    function addFilter() {
+        tempFilters = [...tempFilters, { column: columns[0] || '', operator: '=', value: '' }];
+    }
+
+    function removeFilter(index: number) {
+        tempFilters = tempFilters.filter((_, i) => i !== index);
+    }
+
+    function applyFilter() {
+        appState.currentSearchFilters = tempFilters.filter(f => f.column && f.operator && f.value !== '');
+        appState.currentSearchLogic = tempSearchLogic;
+        appState.currentPage = 1;
+        showFilterModal = false;
+        loadData();
+    }
+
+    function clearFilter() {
+        appState.currentSearchFilters = [];
+        appState.currentPage = 1;
+        showFilterModal = false;
+        loadData();
+    }
 
     function handleExport(level: 'server' | 'database' | 'table', db: string | null, tbl: string | null, options: any) {
         if (level === 'server') {
@@ -214,8 +275,8 @@
     <!-- Toolbar -->
     <div class="p-2 border-b flex items-center justify-between bg-muted/30">
         <div class="flex items-center gap-2">
-            <button class="btn btn-sm btn-secondary text-xs">Filter</button>
-            <button class="btn btn-sm btn-secondary text-xs">Sort</button>
+            <button class="btn btn-sm btn-secondary text-xs {appState.currentSearchFilters.length > 0 ? 'bg-primary/20 border-primary/30 text-primary' : ''}" onclick={openFilterModal}>Filter</button>
+            <button class="btn btn-sm btn-secondary text-xs {appState.currentSortColumn ? 'bg-primary/20 border-primary/30 text-primary' : ''}" onclick={openSortModal}>Sort</button>
             <button class="btn btn-sm btn-secondary text-xs" onclick={() => showImportModal = true}>Import</button>
             <button class="btn btn-sm btn-secondary text-xs" onclick={() => showExportModal = true}>Export</button>
             {#if selectedRows.length > 0}
@@ -393,6 +454,78 @@
                 <button class="px-4 py-2 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors" onclick={saveEditedRow}>Save Changes</button>
             </div>
         {/if}
+    </div>
+</Modal>
+
+<Modal bind:isOpen={showSortModal} title="Sort Data">
+    <div class="flex flex-col gap-4">
+        <div class="flex items-center gap-2">
+            <select class="flex-1 bg-background border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={tempSortColumn}>
+                {#each columns as col}
+                    <option value={col}>{col}</option>
+                {/each}
+            </select>
+            <select class="w-32 bg-background border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={tempSortDirection}>
+                <option value="ASC">Ascending</option>
+                <option value="DESC">Descending</option>
+            </select>
+        </div>
+        <div class="flex justify-end gap-2 mt-4 pt-4 border-t">
+            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors text-destructive" onclick={clearSort}>Clear Sort</button>
+            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors" onclick={() => showSortModal = false}>Cancel</button>
+            <button class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity" onclick={applySort}>Apply</button>
+        </div>
+    </div>
+</Modal>
+
+<Modal bind:isOpen={showFilterModal} title="Filter Data">
+    <div class="flex flex-col gap-4">
+        {#each tempFilters as filter, index}
+            <div class="flex items-center gap-2">
+                <select class="flex-1 bg-background border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={filter.column}>
+                    {#each columns as col}
+                        <option value={col}>{col}</option>
+                    {/each}
+                </select>
+                <select class="w-32 bg-background border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={filter.operator}>
+                    <option value="=">=</option>
+                    <option value="!=">!=</option>
+                    <option value=">">&gt;</option>
+                    <option value="<">&lt;</option>
+                    <option value=">=">&gt;=</option>
+                    <option value="<=">&lt;=</option>
+                    <option value="LIKE">LIKE</option>
+                    <option value="NOT LIKE">NOT LIKE</option>
+                </select>
+                <input 
+                    type="text" 
+                    class="flex-1 h-8 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    placeholder="Value..."
+                    bind:value={filter.value}
+                />
+                <button class="p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive rounded-md transition-colors" onclick={() => removeFilter(index)}>
+                    <Trash2 size={16}/>
+                </button>
+            </div>
+            {#if index < tempFilters.length - 1}
+                <div class="flex justify-center -my-2 relative z-10">
+                    <select class="bg-muted text-xs font-medium px-2 py-1 rounded-full border border-border focus:outline-none" bind:value={tempSearchLogic}>
+                        <option value="AND">AND</option>
+                        <option value="OR">OR</option>
+                    </select>
+                </div>
+            {/if}
+        {/each}
+        
+        <div class="mt-2">
+            <button class="text-sm font-medium text-primary hover:underline" onclick={addFilter}>+ Add Filter</button>
+        </div>
+
+        <div class="flex justify-end gap-2 mt-4 pt-4 border-t">
+            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors text-destructive" onclick={clearFilter}>Clear Filters</button>
+            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors" onclick={() => showFilterModal = false}>Cancel</button>
+            <button class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity" onclick={applyFilter}>Apply Filters</button>
+        </div>
     </div>
 </Modal>
 

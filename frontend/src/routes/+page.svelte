@@ -17,7 +17,11 @@
 	import { Bot, Settings2, Plus, Settings, LogOut, RefreshCw } from "@lucide/svelte";
 	import { onMount } from "svelte";
 
+	let isRefreshing = $state(false);
+
 	function handleRefresh() {
+		if (isRefreshing) return;
+		isRefreshing = true;
 		socket.emit("get_databases");
 		if (appState.currentDatabase && appState.currentTable) {
 			if (appState.activeTab === "data") {
@@ -46,6 +50,9 @@
 				});
 			}
 		}
+		setTimeout(() => {
+			isRefreshing = false;
+		}, 600);
 	}
 
 	let isSettingsOpen = $state(false);
@@ -98,10 +105,11 @@
 					<span>Databases</span>
 				</div>
 				<button
-					class="text-xs bg-secondary text-secondary-foreground px-2 py-1 rounded hover:opacity-80 flex items-center gap-1"
+					class="text-xs bg-secondary text-secondary-foreground px-2 py-1 rounded hover:opacity-80 flex items-center gap-1 transition-all {isRefreshing ? 'opacity-50 cursor-not-allowed' : ''}"
 					onclick={handleRefresh}
+					disabled={isRefreshing}
 					>
-					<RefreshCw class="w-3 h-3" />
+					<RefreshCw class="w-3 h-3 {isRefreshing ? 'animate-spin' : ''}" />
 					Refresh
 				</button>
 			</div>
