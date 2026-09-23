@@ -287,8 +287,8 @@
         showEditModal = true;
     }
 
-    // Emits update event for modified row via socket
-    function saveEditedRow() {
+    // Emits update event for modified row via API
+    async function saveEditedRow() {
         if (
             !appState.currentDatabase ||
             !appState.currentTable ||
@@ -305,22 +305,43 @@
 
         // Strip Svelte state proxy wrapper by copying data
         const updateData = JSON.parse(JSON.stringify(editRowData));
-        console.log("Sending update row data", {
-            database: appState.currentDatabase,
-            table: appState.currentTable,
-            primaryKeyColumn: editPkColumn,
-            primaryKeyValue: editPkValue,
-            updateData: updateData,
-        });
-        socket.emit("update_row", {
-            database: appState.currentDatabase,
-            table: appState.currentTable,
-            primaryKeyColumn: editPkColumn,
-            primaryKeyValue: editPkValue,
-            updateData: updateData,
-        });
-        showEditModal = false;
-        setTimeout(loadData, 500);
+        
+        // Format ISO datetime strings for MySQL (e.g. '2026-09-22T21:43:40.000Z' -> '2026-09-22 21:43:40')
+        for (const key in updateData) {
+            if (typeof updateData[key] === 'string') {
+                const isoRegex = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d{1,3})?Z?$/;
+                const match = updateData[key].match(isoRegex);
+                if (match) {
+                    updateData[key] = `${match[1]} ${match[2]}`;
+                }
+            }
+        }
+        
+        try {
+            const res = await fetch('/api/data/update_row', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    database: appState.currentDatabase,
+                    table: appState.currentTable,
+                    primaryKeyColumn: editPkColumn,
+                    primaryKeyValue: editPkValue,
+                    updateData: updateData,
+                    socketId: socket.id
+                })
+            });
+            const result = await res.json();
+            
+            if (!res.ok) {
+                console.error("Update failed:", result.error);
+                return;
+            }
+            
+            showEditModal = false;
+            loadData(); // Reload immediately on completion
+        } catch (e) {
+            console.error("Failed to update row", e);
+        }
     }
 
     function duplicateRow(row: any) {
