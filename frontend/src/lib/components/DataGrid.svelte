@@ -17,15 +17,17 @@
     let showFilterModal = $state(false);
 
     let tempSortColumn = $state<string | null>(null);
-    let tempSortDirection = $state<'ASC'|'DESC'>('ASC');
-    
+    let tempSortDirection = $state<"ASC" | "DESC">("ASC");
+
     // --- Temporary Filter State for FilterModal ---
     let tempFilters = $state<any[]>([]);
-    let tempSearchLogic = $state<'AND'|'OR'>('AND');
+    let tempSearchLogic = $state<"AND" | "OR">("AND");
 
     // Opens Sort Modal and initializes it with current sort state
     function openSortModal() {
-        tempSortColumn = appState.currentSortColumn || (columns.length > 0 ? columns[0] : null);
+        tempSortColumn =
+            appState.currentSortColumn ||
+            (columns.length > 0 ? columns[0] : null);
         tempSortDirection = appState.currentSortDirection;
         showSortModal = true;
     }
@@ -38,7 +40,7 @@
         showSortModal = false;
         loadData();
     }
-    
+
     // Clears active sort from global appState
     function clearSort() {
         appState.currentSortColumn = null;
@@ -52,14 +54,18 @@
         tempFilters = JSON.parse(JSON.stringify(appState.currentSearchFilters));
         tempSearchLogic = appState.currentSearchLogic;
         if (tempFilters.length === 0) {
-            tempFilters = [{ column: columns[0] || '', operator: '=', value: '' }];
+            tempFilters = [
+                { column: columns[0] || "", operator: "=", value: "" },
+            ];
         }
         showFilterModal = true;
     }
 
     // Applies filters from modal to global appState and reloads data
     function applyFilter() {
-        appState.currentSearchFilters = tempFilters.filter(f => f.column && f.operator && f.value !== '');
+        appState.currentSearchFilters = tempFilters.filter(
+            (f) => f.column && f.operator && f.value !== "",
+        );
         appState.currentSearchLogic = tempSearchLogic;
         appState.currentPage = 1;
         showFilterModal = false;
@@ -75,12 +81,17 @@
     }
 
     // Handles Export Operations via websockets
-    function handleExport(level: 'server' | 'database' | 'table', db: string | null, tbl: string | null, options: any) {
-        if (level === 'server') {
-            socket.emit("export_server", { options }); 
-        } else if (level === 'table' && db && tbl) {
+    function handleExport(
+        level: "server" | "database" | "table",
+        db: string | null,
+        tbl: string | null,
+        options: any,
+    ) {
+        if (level === "server") {
+            socket.emit("export_server", { options });
+        } else if (level === "table" && db && tbl) {
             socket.emit("export_table", { database: db, table: tbl, options });
-        } else if (level === 'database' && db) {
+        } else if (level === "database" && db) {
             socket.emit("export_database", { database: db, options });
         }
     }
@@ -91,7 +102,7 @@
     let data = $state<any[]>([]);
     let columns = $state<string[]>([]);
     let selectedRows = $state<number[]>([]);
-    
+
     // --- Context Menu State ---
     let contextMenu = $state<{
         show: boolean;
@@ -201,14 +212,24 @@
 
     // Parses enum options from schema to render select dropdowns in EditModal
     function getEnumOptions(col: string): string[] | null {
+        // console.log("Current table structure", appState.currentTableStructure);
         if (!appState.currentTableStructure) return null;
-        const columnDef = appState.currentTableStructure.find((c: any) => c.Field === col);
+        const columnDef = appState.currentTableStructure.find(
+            (c: any) => c.Field === col,
+        );
+        // console.log("Column def", columnDef, "was finding for", col);
         if (!columnDef) return null;
-        
-        if (columnDef.Type && columnDef.Type.toLowerCase().startsWith('enum(')) {
+
+        if (
+            columnDef.Type &&
+            columnDef.Type.toLowerCase().startsWith("enum(")
+        ) {
             const match = columnDef.Type.match(/enum\((.*)\)/i);
+            // console.log("Match", match);
             if (match && match[1]) {
-                return match[1].split(',').map((s: string) => s.trim().replace(/^['"]|['"]$/g, ''));
+                return match[1]
+                    .split(",")
+                    .map((s: string) => s.trim().replace(/^['"]|['"]$/g, ""));
             }
         }
         return null;
@@ -217,7 +238,9 @@
     // Fetches primary key column from current table's schema
     function getPkColumn(): string {
         if (appState.currentTableStructure) {
-            const pk = appState.currentTableStructure.find((c: any) => c.Key === 'PRI');
+            const pk = appState.currentTableStructure.find(
+                (c: any) => c.Key === "PRI",
+            );
             if (pk) return pk.Field;
         }
         return columns[0];
@@ -226,18 +249,31 @@
     // Displays context menu on right click
     function handleRowContextMenu(e: MouseEvent, row: any, index: number) {
         e.preventDefault();
-        const pkColumn = getPkColumn(); 
+        const pkColumn = getPkColumn();
         const pkValue = row[pkColumn];
-        
+
         contextMenu = {
             show: true,
             x: e.clientX,
             y: e.clientY,
             options: [
-                { label: "Edit Row", icon: Edit2, action: () => editRow(row, pkColumn, pkValue) },
-                { label: "Duplicate Row", icon: Copy, action: () => duplicateRow(row) },
-                { label: "Delete Row", icon: Trash2, class: "text-destructive", action: () => deleteRow(pkColumn, pkValue) }
-            ]
+                {
+                    label: "Edit Row",
+                    icon: Edit2,
+                    action: () => editRow(row, pkColumn, pkValue),
+                },
+                {
+                    label: "Duplicate Row",
+                    icon: Copy,
+                    action: () => duplicateRow(row),
+                },
+                {
+                    label: "Delete Row",
+                    icon: Trash2,
+                    class: "text-destructive",
+                    action: () => deleteRow(pkColumn, pkValue),
+                },
+            ],
         };
     }
 
@@ -253,17 +289,35 @@
 
     // Emits update event for modified row via socket
     function saveEditedRow() {
-        if (!appState.currentDatabase || !appState.currentTable || !editPkColumn) return;
-        
-        // Strip Svelte state proxy wrapper by copying data 
+        if (
+            !appState.currentDatabase ||
+            !appState.currentTable ||
+            !editPkColumn
+        ) {
+            console.log(
+                "Returning because some values are null",
+                appState.currentDatabase,
+                appState.currentTable,
+                editPkColumn,
+            );
+            return;
+        }
+
+        // Strip Svelte state proxy wrapper by copying data
         const updateData = JSON.parse(JSON.stringify(editRowData));
-        
+        console.log("Sending update row data", {
+            database: appState.currentDatabase,
+            table: appState.currentTable,
+            primaryKeyColumn: editPkColumn,
+            primaryKeyValue: editPkValue,
+            updateData: updateData,
+        });
         socket.emit("update_row", {
             database: appState.currentDatabase,
             table: appState.currentTable,
             primaryKeyColumn: editPkColumn,
             primaryKeyValue: editPkValue,
-            updateData: updateData
+            updateData: updateData,
         });
         showEditModal = false;
         setTimeout(loadData, 500);
@@ -274,23 +328,27 @@
         const newRow = JSON.parse(JSON.stringify(row));
         const pkCol = getPkColumn();
         if (pkCol) delete newRow[pkCol];
-        
+
         if (appState.currentDatabase && appState.currentTable) {
-            socket.emit("insert_row", { database: appState.currentDatabase, table: appState.currentTable, rowData: newRow });
+            socket.emit("insert_row", {
+                database: appState.currentDatabase,
+                table: appState.currentTable,
+                rowData: newRow,
+            });
         }
     }
 
     function deleteRow(pkCol: string, pkVal: any) {
         if (confirm("Delete this row?")) {
             if (appState.currentDatabase && appState.currentTable) {
-                socket.emit("delete_selected_data", { 
-                    database: appState.currentDatabase, 
-                    table: appState.currentTable, 
-                    targetColumn: pkCol, 
-                    targetValues: [pkVal] 
+                socket.emit("delete_selected_data", {
+                    database: appState.currentDatabase,
+                    table: appState.currentTable,
+                    targetColumn: pkCol,
+                    targetValues: [pkVal],
                 });
                 // We could reload data here or rely on socket broadcast
-                setTimeout(loadData, 500); 
+                setTimeout(loadData, 500);
             }
         }
     }
@@ -298,12 +356,12 @@
         if (confirm(`Delete ${selectedRows.length} selected rows?`)) {
             if (appState.currentDatabase && appState.currentTable) {
                 const pkCol = columns[0];
-                const pkValues = selectedRows.map(i => data[i][pkCol]);
+                const pkValues = selectedRows.map((i) => data[i][pkCol]);
                 socket.emit("delete_selected_data", {
                     database: appState.currentDatabase,
                     table: appState.currentTable,
                     targetColumn: pkCol,
-                    targetValues: pkValues
+                    targetValues: pkValues,
                 });
                 setTimeout(loadData, 500);
             }
@@ -317,15 +375,38 @@
     <!-- Toolbar -->
     <div class="p-2 border-b flex items-center justify-between bg-muted/30">
         <div class="flex items-center gap-2">
-            <button class="btn btn-sm btn-secondary text-xs {appState.currentSearchFilters.length > 0 ? 'bg-primary/20 border-primary/30 text-primary' : ''}" onclick={openFilterModal}>Filter</button>
-            <button class="btn btn-sm btn-secondary text-xs {appState.currentSortColumn ? 'bg-primary/20 border-primary/30 text-primary' : ''}" onclick={openSortModal}>Sort</button>
-            <button class="btn btn-sm btn-secondary text-xs" onclick={() => showImportModal = true}>Import</button>
-            <button class="btn btn-sm btn-secondary text-xs" onclick={() => showExportModal = true}>Export</button>
+            <button
+                class="btn btn-sm btn-secondary text-xs {appState
+                    .currentSearchFilters.length > 0
+                    ? 'bg-primary/20 border-primary/30 text-primary'
+                    : ''}"
+                onclick={openFilterModal}>Filter</button
+            >
+            <button
+                class="btn btn-sm btn-secondary text-xs {appState.currentSortColumn
+                    ? 'bg-primary/20 border-primary/30 text-primary'
+                    : ''}"
+                onclick={openSortModal}>Sort</button
+            >
+            <button
+                class="btn btn-sm btn-secondary text-xs"
+                onclick={() => (showImportModal = true)}>Import</button
+            >
+            <button
+                class="btn btn-sm btn-secondary text-xs"
+                onclick={() => (showExportModal = true)}>Export</button
+            >
             {#if selectedRows.length > 0}
                 <div class="w-px h-4 bg-border mx-1"></div>
-                <span class="text-xs font-medium bg-primary/10 text-primary px-2 py-1 rounded">{selectedRows.length} selected</span>
-                <button class="btn btn-sm btn-secondary text-xs text-destructive hover:bg-destructive/10" onclick={deleteSelectedRows}>
-                    <Trash2 size={14} class="mr-1 inline"/> Delete Selected
+                <span
+                    class="text-xs font-medium bg-primary/10 text-primary px-2 py-1 rounded"
+                    >{selectedRows.length} selected</span
+                >
+                <button
+                    class="btn btn-sm btn-secondary text-xs text-destructive hover:bg-destructive/10"
+                    onclick={deleteSelectedRows}
+                >
+                    <Trash2 size={14} class="mr-1 inline" /> Delete Selected
                 </button>
             {/if}
         </div>
@@ -421,7 +502,8 @@
                             )
                                 ? 'bg-primary/5'
                                 : ''}"
-                            oncontextmenu={(e) => handleRowContextMenu(e, row, i)}
+                            oncontextmenu={(e) =>
+                                handleRowContextMenu(e, row, i)}
                         >
                             <td class="px-4 py-2">
                                 <input
@@ -450,13 +532,20 @@
                             <td class="px-4 py-2 whitespace-nowrap">
                                 <button
                                     class="text-xs text-primary hover:underline mr-2"
-                                    onclick={() => editRow(row, getPkColumn(), row[getPkColumn()])}
-                                    >Edit</button
+                                    onclick={() =>
+                                        editRow(
+                                            row,
+                                            getPkColumn(),
+                                            row[getPkColumn()],
+                                        )}>Edit</button
                                 >
                                 <button
                                     class="text-xs text-destructive hover:underline"
-                                    onclick={() => deleteRow(getPkColumn(), row[getPkColumn()])}
-                                    >Del</button
+                                    onclick={() =>
+                                        deleteRow(
+                                            getPkColumn(),
+                                            row[getPkColumn()],
+                                        )}>Del</button
                                 >
                             </td>
                         </tr>
@@ -476,46 +565,48 @@
     />
 {/if}
 
-<EditRowModal 
-    bind:isOpen={showEditModal} 
-    columns={columns} 
-    bind:editRowData={editRowData} 
-    editPkColumn={editPkColumn} 
-    getEnumOptions={getEnumOptions}
-    onSave={saveEditedRow} 
+<EditRowModal
+    bind:isOpen={showEditModal}
+    {columns}
+    bind:editRowData
+    {editPkColumn}
+    {getEnumOptions}
+    onSave={saveEditedRow}
 />
 
-<SortModal 
-    bind:isOpen={showSortModal} 
-    columns={columns} 
-    bind:tempSortColumn={tempSortColumn} 
-    bind:tempSortDirection={tempSortDirection} 
-    onApply={applySort} 
-    onClear={clearSort} 
+<SortModal
+    bind:isOpen={showSortModal}
+    {columns}
+    bind:tempSortColumn
+    bind:tempSortDirection
+    onApply={applySort}
+    onClear={clearSort}
 />
 
-<FilterModal 
-    bind:isOpen={showFilterModal} 
-    columns={columns} 
-    bind:tempFilters={tempFilters} 
-    bind:tempSearchLogic={tempSearchLogic} 
-    onApply={applyFilter} 
-    onClear={clearFilter} 
+<FilterModal
+    bind:isOpen={showFilterModal}
+    {columns}
+    bind:tempFilters
+    bind:tempSearchLogic
+    onApply={applyFilter}
+    onClear={clearFilter}
 />
 
-<ExportModal 
-    show={showExportModal} 
+<ExportModal
+    show={showExportModal}
     initialDatabase={appState.currentDatabase}
     initialTable={appState.currentTable}
-    selectedPKValues={selectedRows.length > 0 ? selectedRows.map(i => data[i][columns[0]]) : null}
+    selectedPKValues={selectedRows.length > 0
+        ? selectedRows.map((i) => data[i][columns[0]])
+        : null}
     pkColumn={selectedRows.length > 0 ? columns[0] : null}
-    onClose={() => showExportModal = false}
+    onClose={() => (showExportModal = false)}
     onExport={handleExport}
 />
 
 {#if showImportModal}
-<ImportModal
-    show={showImportModal}
-    onClose={() => showImportModal = false}
-/>
+    <ImportModal
+        show={showImportModal}
+        onClose={() => (showImportModal = false)}
+    />
 {/if}

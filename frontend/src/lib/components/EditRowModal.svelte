@@ -11,7 +11,7 @@
     }: {
         isOpen: boolean;
         columns: string[];
-        editRowData: any;
+        editRowData: Record<string, any> | null;
         editPkColumn: string;
         getEnumOptions: (col: string) => string[] | null;
         onSave: () => void;

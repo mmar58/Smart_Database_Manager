@@ -5,8 +5,6 @@
     import { Settings, Plus, Trash2, Edit2, Play, Hash } from "@lucide/svelte";
     import type { TableColumn } from "$lib/types";
 
-    let structure = $state<TableColumn[]>([]);
-    
     // Alter table states
     let activeSection = $state<"addCol" | "dropCol" | "modifyCol" | "addIndex" | "customAlter">("addCol");
     
@@ -32,18 +30,6 @@
                 table: appState.currentTable 
             });
         }
-    });
-
-    onMount(() => {
-        socket.on("table_structure", (data: { database: string; table: string; structure: TableColumn[] }) => {
-            if (data.database === appState.currentDatabase && data.table === appState.currentTable) {
-                structure = data.structure || [];
-            }
-        });
-
-        return () => {
-            socket.off("table_structure");
-        };
     });
 
     function refreshStructure() {
@@ -131,7 +117,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {#each structure as col}
+                        {#each (appState.currentTableStructure || []) as col}
                             <tr class="border-b hover:bg-muted/50 transition-colors">
                                 {#if editingColumn === col.Field}
                                     <td class="px-2 py-2">
@@ -174,7 +160,7 @@
                                 {/if}
                             </tr>
                         {/each}
-                        {#if structure.length === 0}
+                        {#if !appState.currentTableStructure || appState.currentTableStructure.length === 0}
                             <tr>
                                 <td colspan="7" class="px-4 py-8 text-center text-muted-foreground">
                                     Loading structure...

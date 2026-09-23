@@ -63,6 +63,10 @@
 	$effect(() => {
 		if (appState.currentDatabase !== lastDb || appState.currentTable !== lastTable) {
 			appState.savedQuery = "";
+			appState.currentTableStructure = null;
+			if (appState.currentDatabase && appState.currentTable) {
+				socket.emit("get_table_structure", { database: appState.currentDatabase, table: appState.currentTable });
+			}
 			lastDb = appState.currentDatabase;
 			lastTable = appState.currentTable;
 		}
@@ -70,6 +74,17 @@
 
 	onMount(() => {
 		initSettings();
+
+		const handleStructure = (data: { database: string; table: string; structure: any[] }) => {
+			if (data.database === appState.currentDatabase && data.table === appState.currentTable) {
+				appState.currentTableStructure = data.structure;
+			}
+		};
+		socket.on("table_structure", handleStructure);
+
+		return () => {
+			socket.off("table_structure", handleStructure);
+		};
 	});
 </script>
 
