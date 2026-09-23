@@ -6,7 +6,11 @@
     import Modal from "./Modal.svelte";
     import ExportModal from "./ExportModal.svelte";
     import ImportModal from "./ImportModal.svelte";
+    import EditRowModal from "./EditRowModal.svelte";
+    import SortModal from "./SortModal.svelte";
+    import FilterModal from "./FilterModal.svelte";
 
+    // --- Modal Visibility State ---
     let showExportModal = $state(false);
     let showImportModal = $state(false);
     let showSortModal = $state(false);
@@ -15,15 +19,18 @@
     let tempSortColumn = $state<string | null>(null);
     let tempSortDirection = $state<'ASC'|'DESC'>('ASC');
     
+    // --- Temporary Filter State for FilterModal ---
     let tempFilters = $state<any[]>([]);
     let tempSearchLogic = $state<'AND'|'OR'>('AND');
 
+    // Opens Sort Modal and initializes it with current sort state
     function openSortModal() {
         tempSortColumn = appState.currentSortColumn || (columns.length > 0 ? columns[0] : null);
         tempSortDirection = appState.currentSortDirection;
         showSortModal = true;
     }
 
+    // Applies sort from modal to global appState and reloads data
     function applySort() {
         appState.currentSortColumn = tempSortColumn;
         appState.currentSortDirection = tempSortDirection;
@@ -32,6 +39,7 @@
         loadData();
     }
     
+    // Clears active sort from global appState
     function clearSort() {
         appState.currentSortColumn = null;
         appState.currentPage = 1;
@@ -39,23 +47,17 @@
         loadData();
     }
 
+    // Opens Filter Modal and initializes with current filters
     function openFilterModal() {
         tempFilters = JSON.parse(JSON.stringify(appState.currentSearchFilters));
         tempSearchLogic = appState.currentSearchLogic;
         if (tempFilters.length === 0) {
-            addFilter();
+            tempFilters = [{ column: columns[0] || '', operator: '=', value: '' }];
         }
         showFilterModal = true;
     }
 
-    function addFilter() {
-        tempFilters = [...tempFilters, { column: columns[0] || '', operator: '=', value: '' }];
-    }
-
-    function removeFilter(index: number) {
-        tempFilters = tempFilters.filter((_, i) => i !== index);
-    }
-
+    // Applies filters from modal to global appState and reloads data
     function applyFilter() {
         appState.currentSearchFilters = tempFilters.filter(f => f.column && f.operator && f.value !== '');
         appState.currentSearchLogic = tempSearchLogic;
@@ -64,6 +66,7 @@
         loadData();
     }
 
+    // Clears all filters
     function clearFilter() {
         appState.currentSearchFilters = [];
         appState.currentPage = 1;
@@ -71,6 +74,7 @@
         loadData();
     }
 
+    // Handles Export Operations via websockets
     function handleExport(level: 'server' | 'database' | 'table', db: string | null, tbl: string | null, options: any) {
         if (level === 'server') {
             socket.emit("export_server", { options }); 
@@ -81,12 +85,14 @@
         }
     }
 
-    // We expect the backend to send the table data over socket
-    // Alternatively, we could have state.ts store it, but let's keep it here for now
+    // --- Table Data State ---
+    // data: Array of rows fetched from the server
+    // columns: Keys extracted from the first row of data
     let data = $state<any[]>([]);
     let columns = $state<string[]>([]);
     let selectedRows = $state<number[]>([]);
     
+    // --- Context Menu State ---
     let contextMenu = $state<{
         show: boolean;
         x: number;
@@ -94,12 +100,15 @@
         options: any[];
     }>({ show: false, x: 0, y: 0, options: [] });
 
+    // --- Edit Row State ---
     let showEditModal = $state(false);
     let editRowData = $state<any>(null);
     let editPkColumn = $state("");
     let editPkValue = $state<any>(null);
 
+    // --- WebSocket Event Listeners ---
     $effect(() => {
+        // Listens for 'table_data' event and updates table state locally
         const handleData = (payload: {
             data: any[];
             total: number;
@@ -123,6 +132,7 @@
         };
     });
 
+    // Helper to toggle sort column directly from table header
     function toggleSort(col: string) {
         if (appState.currentSortColumn === col) {
             appState.currentSortDirection =
@@ -134,8 +144,9 @@
         loadData();
     }
 
+    // --- Reactivity for Data Loading ---
     $effect(() => {
-        // Auto-fetch data when relevant state changes
+        // Auto-fetch data when relevant state changes (pagination, sort, filter)
         if (appState.currentDatabase && appState.currentTable) {
             const offset = (appState.currentPage - 1) * appState.pageSize;
             socket.emit("get_table_data", {
@@ -153,8 +164,8 @@
         }
     });
 
+    // Manually trigger data load
     function loadData() {
-        // This can be kept for manual refresh if needed, but the $effect handles automatic fetching
         if (!appState.currentDatabase || !appState.currentTable) return;
         const offset = (appState.currentPage - 1) * appState.pageSize;
         socket.emit("get_table_data", {
@@ -188,10 +199,34 @@
         }
     }
 
+    // Parses enum options from schema to render select dropdowns in EditModal
+    function getEnumOptions(col: string): string[] | null {
+        if (!appState.currentTableStructure) return null;
+        const columnDef = appState.currentTableStructure.find((c: any) => c.Field === col);
+        if (!columnDef) return null;
+        
+        if (columnDef.Type && columnDef.Type.toLowerCase().startsWith('enum(')) {
+            const match = columnDef.Type.match(/enum\((.*)\)/i);
+            if (match && match[1]) {
+                return match[1].split(',').map((s: string) => s.trim().replace(/^['"]|['"]$/g, ''));
+            }
+        }
+        return null;
+    }
+
+    // Fetches primary key column from current table's schema
+    function getPkColumn(): string {
+        if (appState.currentTableStructure) {
+            const pk = appState.currentTableStructure.find((c: any) => c.Key === 'PRI');
+            if (pk) return pk.Field;
+        }
+        return columns[0];
+    }
+
+    // Displays context menu on right click
     function handleRowContextMenu(e: MouseEvent, row: any, index: number) {
         e.preventDefault();
-        // Fallback to the first column as PK if none defined by user
-        const pkColumn = columns[0]; 
+        const pkColumn = getPkColumn(); 
         const pkValue = row[pkColumn];
         
         contextMenu = {
@@ -206,21 +241,29 @@
         };
     }
 
+    // --- CRUD Operations ---
+
     function editRow(row: any, pkCol: string, pkVal: any) {
-        editRowData = { ...row };
+        // Create a deep copy to ensure Svelte 5 state reactivity doesn't interfere prematurely
+        editRowData = JSON.parse(JSON.stringify(row));
         editPkColumn = pkCol;
         editPkValue = pkVal;
         showEditModal = true;
     }
 
+    // Emits update event for modified row via socket
     function saveEditedRow() {
         if (!appState.currentDatabase || !appState.currentTable || !editPkColumn) return;
+        
+        // Strip Svelte state proxy wrapper by copying data 
+        const updateData = JSON.parse(JSON.stringify(editRowData));
+        
         socket.emit("update_row", {
             database: appState.currentDatabase,
             table: appState.currentTable,
             primaryKeyColumn: editPkColumn,
             primaryKeyValue: editPkValue,
-            updateData: editRowData
+            updateData: updateData
         });
         showEditModal = false;
         setTimeout(loadData, 500);
@@ -228,10 +271,9 @@
 
     function duplicateRow(row: any) {
         // Strip auto-increment keys if possible, then insert
-        // For now, just send the whole row as insert (it might fail if PK is auto-increment but included)
-        const newRow = { ...row };
-        // Basic heuristic to remove 'id' if it's the first column
-        if (columns[0].toLowerCase() === 'id') delete newRow[columns[0]];
+        const newRow = JSON.parse(JSON.stringify(row));
+        const pkCol = getPkColumn();
+        if (pkCol) delete newRow[pkCol];
         
         if (appState.currentDatabase && appState.currentTable) {
             socket.emit("insert_row", { database: appState.currentDatabase, table: appState.currentTable, rowData: newRow });
@@ -408,12 +450,12 @@
                             <td class="px-4 py-2 whitespace-nowrap">
                                 <button
                                     class="text-xs text-primary hover:underline mr-2"
-                                    onclick={() => editRow(row, columns[0], row[columns[0]])}
+                                    onclick={() => editRow(row, getPkColumn(), row[getPkColumn()])}
                                     >Edit</button
                                 >
                                 <button
                                     class="text-xs text-destructive hover:underline"
-                                    onclick={() => deleteRow(columns[0], row[columns[0]])}
+                                    onclick={() => deleteRow(getPkColumn(), row[getPkColumn()])}
                                     >Del</button
                                 >
                             </td>
@@ -434,100 +476,32 @@
     />
 {/if}
 
-<Modal bind:isOpen={showEditModal} title="Edit Row">
-    <div class="flex flex-col gap-4">
-        {#if editRowData}
-            {#each columns as col}
-                <div class="flex flex-col gap-1">
-                    <label for="edit-{col}" class="text-sm font-medium">{col}</label>
-                    <input 
-                        id="edit-{col}"
-                        type="text" 
-                        class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                        bind:value={editRowData[col]}
-                        disabled={col === editPkColumn}
-                    />
-                </div>
-            {/each}
-            <div class="flex justify-end gap-2 mt-4">
-                <button class="px-4 py-2 text-sm font-medium rounded-md hover:bg-secondary transition-colors" onclick={() => showEditModal = false}>Cancel</button>
-                <button class="px-4 py-2 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors" onclick={saveEditedRow}>Save Changes</button>
-            </div>
-        {/if}
-    </div>
-</Modal>
+<EditRowModal 
+    bind:isOpen={showEditModal} 
+    columns={columns} 
+    bind:editRowData={editRowData} 
+    editPkColumn={editPkColumn} 
+    getEnumOptions={getEnumOptions}
+    onSave={saveEditedRow} 
+/>
 
-<Modal bind:isOpen={showSortModal} title="Sort Data">
-    <div class="flex flex-col gap-4">
-        <div class="flex items-center gap-2">
-            <select class="flex-1 bg-background border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={tempSortColumn}>
-                {#each columns as col}
-                    <option value={col}>{col}</option>
-                {/each}
-            </select>
-            <select class="w-32 bg-background border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={tempSortDirection}>
-                <option value="ASC">Ascending</option>
-                <option value="DESC">Descending</option>
-            </select>
-        </div>
-        <div class="flex justify-end gap-2 mt-4 pt-4 border-t">
-            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors text-destructive" onclick={clearSort}>Clear Sort</button>
-            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors" onclick={() => showSortModal = false}>Cancel</button>
-            <button class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity" onclick={applySort}>Apply</button>
-        </div>
-    </div>
-</Modal>
+<SortModal 
+    bind:isOpen={showSortModal} 
+    columns={columns} 
+    bind:tempSortColumn={tempSortColumn} 
+    bind:tempSortDirection={tempSortDirection} 
+    onApply={applySort} 
+    onClear={clearSort} 
+/>
 
-<Modal bind:isOpen={showFilterModal} title="Filter Data">
-    <div class="flex flex-col gap-4">
-        {#each tempFilters as filter, index}
-            <div class="flex items-center gap-2">
-                <select class="flex-1 bg-background border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={filter.column}>
-                    {#each columns as col}
-                        <option value={col}>{col}</option>
-                    {/each}
-                </select>
-                <select class="w-32 bg-background border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" bind:value={filter.operator}>
-                    <option value="=">=</option>
-                    <option value="!=">!=</option>
-                    <option value=">">&gt;</option>
-                    <option value="<">&lt;</option>
-                    <option value=">=">&gt;=</option>
-                    <option value="<=">&lt;=</option>
-                    <option value="LIKE">LIKE</option>
-                    <option value="NOT LIKE">NOT LIKE</option>
-                </select>
-                <input 
-                    type="text" 
-                    class="flex-1 h-8 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    placeholder="Value..."
-                    bind:value={filter.value}
-                />
-                <button class="p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive rounded-md transition-colors" onclick={() => removeFilter(index)}>
-                    <Trash2 size={16}/>
-                </button>
-            </div>
-            {#if index < tempFilters.length - 1}
-                <div class="flex justify-center -my-2 relative z-10">
-                    <select class="bg-muted text-xs font-medium px-2 py-1 rounded-full border border-border focus:outline-none" bind:value={tempSearchLogic}>
-                        <option value="AND">AND</option>
-                        <option value="OR">OR</option>
-                    </select>
-                </div>
-            {/if}
-        {/each}
-        
-        <div class="mt-2">
-            <button class="text-sm font-medium text-primary hover:underline" onclick={addFilter}>+ Add Filter</button>
-        </div>
-
-        <div class="flex justify-end gap-2 mt-4 pt-4 border-t">
-            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors text-destructive" onclick={clearFilter}>Clear Filters</button>
-            <button class="px-4 py-2 text-sm font-medium hover:bg-muted rounded-md transition-colors" onclick={() => showFilterModal = false}>Cancel</button>
-            <button class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity" onclick={applyFilter}>Apply Filters</button>
-        </div>
-    </div>
-</Modal>
+<FilterModal 
+    bind:isOpen={showFilterModal} 
+    columns={columns} 
+    bind:tempFilters={tempFilters} 
+    bind:tempSearchLogic={tempSearchLogic} 
+    onApply={applyFilter} 
+    onClear={clearFilter} 
+/>
 
 <ExportModal 
     show={showExportModal} 
