@@ -1,7 +1,7 @@
 module.exports = {
     apps: [
         {
-            name: "mysql-manager",
+            name: "db-manager",
             script: "backend/dist/index.js",
             watch: false,
             env: {
