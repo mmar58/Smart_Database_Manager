@@ -24,10 +24,11 @@
     let database = $state("");
 
     let showAdvanced = $state(false);
+    let enableSsl = $state(false);
     let sslCa = $state("");
     let sslCert = $state("");
     let sslKey = $state("");
-    let rejectUnauthorized = $state(true);
+    let rejectUnauthorized = $state(false);
 
     let saveConnection = $state(false);
     let saveLocation = $state<"local" | "server">("local");
@@ -115,8 +116,9 @@
             sslCa = conn.sslCa || "";
             sslCert = conn.sslCert || "";
             sslKey = conn.sslKey || "";
+            enableSsl = conn.ssl === true || !!(sslCa || sslCert || sslKey);
             rejectUnauthorized = conn.rejectUnauthorized !== false;
-            if (sslCa || sslCert || sslKey) {
+            if (enableSsl || sslCa || sslCert || sslKey) {
                 showAdvanced = true;
             }
             ipRestriction = conn.ipRestriction || "current";
@@ -165,6 +167,7 @@
             user,
             password,
             database,
+            ssl: enableSsl,
             sslCa: sslCa || undefined,
             sslCert: sslCert || undefined,
             sslKey: sslKey || undefined,
@@ -274,6 +277,7 @@
 
         <SslOptions
             bind:showAdvanced
+            bind:enableSsl
             bind:sslCa
             bind:sslCert
             bind:sslKey

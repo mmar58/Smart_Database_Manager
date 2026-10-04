@@ -3,6 +3,8 @@
     
     /** Toggle state for showing the advanced SSL fields */
     export let showAdvanced = false;
+    /** Bound boolean to enable SSL explicitly */
+    export let enableSsl = false;
     /** Bound Certificate Authority content */
     export let sslCa = "";
     /** Bound Client Certificate content */
@@ -10,13 +12,22 @@
     /** Bound Client Key content */
     export let sslKey = "";
     /** Bound boolean to reject unauthorized server certs */
-    export let rejectUnauthorized = true;
+    export let rejectUnauthorized = false;
 </script>
 
 <div class="flex flex-col gap-2 border rounded-md p-4 bg-card">
+    <label class="flex items-center gap-2 text-sm font-medium text-foreground cursor-pointer w-fit pb-2">
+        <input
+            type="checkbox"
+            bind:checked={enableSsl}
+            class="rounded border-input text-primary focus:ring-primary"
+        />
+        Enable SSL Connection
+    </label>
+
     <button
         type="button"
-        class="flex items-center gap-2 text-sm font-medium text-foreground hover:text-primary transition-colors text-left"
+        class="flex items-center gap-2 text-sm font-medium text-foreground hover:text-primary transition-colors text-left border-t pt-2"
         onclick={() => (showAdvanced = !showAdvanced)}
     >
         <Settings2 class="w-4 h-4" />

@@ -24,10 +24,7 @@ function buildSslConfig(
 
   if (
     ssl === undefined &&
-    (credentials.sslCa ||
-      credentials.sslCert ||
-      credentials.sslKey ||
-      credentials.rejectUnauthorized !== undefined)
+    (credentials.sslCa || credentials.sslCert || credentials.sslKey)
   ) {
     ssl = {
       ca: credentials.sslCa,
@@ -37,8 +34,16 @@ function buildSslConfig(
     };
   }
 
+  // If ssl is explicitly a boolean true but no config provided, we should allow it.
+  // We'll treat it as an empty object but apply the rejectUnauthorized flag if provided.
+  if (ssl === true) {
+    ssl = {
+      rejectUnauthorized: credentials.rejectUnauthorized !== undefined ? credentials.rejectUnauthorized : false
+    };
+  }
+
   if (!ssl) return undefined;
-  if (typeof ssl === 'boolean') return ssl ? {} : undefined;
+  
   const cfg: Record<string, unknown> = {
     rejectUnauthorized: (ssl as SslConfig).rejectUnauthorized !== false,
   };
