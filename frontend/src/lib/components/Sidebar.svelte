@@ -62,7 +62,21 @@
         socket.on("table_duplicated", () => {
             if (appState.currentDatabase) socket.emit("get_tables", appState.currentDatabase);
         });
-        socket.on("database_imported", () => socket.emit("get_databases"));
+        socket.on("database_imported", (data) => {
+            socket.emit("get_databases");
+            if (data?.database) {
+                socket.emit("get_tables", data.database);
+            } else if (appState.currentDatabase) {
+                socket.emit("get_tables", appState.currentDatabase);
+            }
+        });
+        socket.on("table_imported", (data) => {
+            if (data?.database) {
+                socket.emit("get_tables", data.database);
+            } else if (appState.currentDatabase) {
+                socket.emit("get_tables", appState.currentDatabase);
+            }
+        });
 
         return () => {
             socket.off("databases_list");
@@ -74,6 +88,7 @@
             socket.off("database_duplicated");
             socket.off("table_duplicated");
             socket.off("database_imported");
+            socket.off("table_imported");
         };
     });
 

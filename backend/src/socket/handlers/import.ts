@@ -25,6 +25,7 @@ export function registerImportHandlers(
           await db.importDatabase(database, content);
         }
         socket.emit('database_imported', {
+          database,
           message: 'Import completed successfully',
         });
       } catch (e) {
@@ -57,6 +58,8 @@ export function registerImportHandlers(
           await db.importDatabase(database, content);
         }
         socket.emit('table_imported', {
+          database,
+          table,
           message: `Import into table ${table} completed successfully`,
         });
       } catch (e) {
