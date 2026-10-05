@@ -240,7 +240,7 @@
         <h1
             class="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-primary to-primary/60"
         >
-            DB Manager
+            Smart Database Manager
         </h1>
         <p class="text-sm font-medium text-muted-foreground">
             Securely connect to your database
